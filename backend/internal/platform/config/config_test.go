@@ -146,12 +146,13 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 
 	t.Run("non-dev with DB_ADMIN_USER passes", func(t *testing.T) {
 		cfg := &Config{
-			AppEnv:           "production",
-			HTTPPort:         "8080",
-			DBPassword:       "secret",
-			DBSSLMode:        "require",
-			CORSAllowOrigins: "https://example.com",
-			DBAdminUser:      "postgres",
+			AppEnv:              "production",
+			HTTPPort:            "8080",
+			DBPassword:          "secret",
+			DBSSLMode:           "require",
+			CORSAllowOrigins:    "https://example.com",
+			DBAdminUser:         "postgres",
+			SessionCookieSecure: true,
 		}
 		err := cfg.validate()
 		if err != nil {
@@ -161,12 +162,13 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 
 	t.Run("non-dev with ADMIN_DATABASE_URL passes", func(t *testing.T) {
 		cfg := &Config{
-			AppEnv:           "production",
-			HTTPPort:         "8080",
-			DBPassword:       "secret",
-			DBSSLMode:        "require",
-			CORSAllowOrigins: "https://example.com",
-			AdminDatabaseURL: "postgres://postgres:secret@db:5432/hr_saas",
+			AppEnv:              "production",
+			HTTPPort:            "8080",
+			DBPassword:          "secret",
+			DBSSLMode:           "require",
+			CORSAllowOrigins:    "https://example.com",
+			AdminDatabaseURL:    "postgres://postgres:secret@db:5432/hr_saas",
+			SessionCookieSecure: true,
 		}
 		err := cfg.validate()
 		if err != nil {

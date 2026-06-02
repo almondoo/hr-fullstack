@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -73,6 +74,27 @@ type Config struct {
 	// Must be 16, 24, or 32 bytes. Required when session auth is enabled.
 	// Placeholder: not enforced here because auth is added in a later slice.
 	SessionBlockKey string `env:"SESSION_BLOCK_KEY"`
+
+	// --- Session / Cookie configuration (P1.3a auth infrastructure) ---
+
+	// SessionCookieName is the name of the HTTP-only session cookie.
+	// Defaults to "hr_session".
+	SessionCookieName string `env:"SESSION_COOKIE_NAME" envDefault:"hr_session"`
+
+	// SessionTTL controls how long a session remains valid.
+	// Accepts any duration string accepted by time.ParseDuration (e.g. "24h").
+	// Defaults to 24 hours.
+	SessionTTL time.Duration `env:"SESSION_TTL" envDefault:"24h"`
+
+	// SessionCookieSecure sets the Secure attribute on the session cookie.
+	// Must be true in production (HTTPS only).
+	// Defaults to false for development convenience; set to true in production.
+	SessionCookieSecure bool `env:"SESSION_COOKIE_SECURE" envDefault:"false"`
+
+	// SessionCookieSameSite controls the SameSite attribute of the session
+	// cookie.  Accepted values: "lax" (default), "strict", "none".
+	// "none" requires Secure=true in modern browsers.
+	SessionCookieSameSite string `env:"SESSION_COOKIE_SAMESITE" envDefault:"lax"`
 }
 
 // Load reads Config from environment variables.
@@ -176,6 +198,26 @@ func (c *Config) validate() error {
 		errs = append(errs, errors.New(
 			"non-development environment: either DB_ADMIN_USER or ADMIN_DATABASE_URL must be set "+
 				"(the hr_app role must not be used for migrations)"))
+	}
+
+	// In non-development environments the session cookie MUST carry the Secure
+	// attribute so it is only transmitted over HTTPS.  Running without Secure=true
+	// in production would expose session tokens over plain HTTP.
+	if !c.IsDevelopment() && !c.SessionCookieSecure {
+		errs = append(errs, errors.New(
+			"SESSION_COOKIE_SECURE must be true in non-development environments"))
+	}
+
+	// Empty string is treated as the default ("lax") so that Config structs
+	// created in tests without this field set continue to pass validation.
+	switch c.SessionCookieSameSite {
+	case "", "lax", "strict", "none":
+		// valid (empty resolves to "lax" at runtime)
+	default:
+		errs = append(errs, fmt.Errorf(
+			"SESSION_COOKIE_SAMESITE %q must be one of: lax, strict, none",
+			c.SessionCookieSameSite,
+		))
 	}
 
 	return errors.Join(errs...)

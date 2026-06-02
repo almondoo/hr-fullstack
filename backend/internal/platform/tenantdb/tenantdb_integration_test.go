@@ -118,12 +118,15 @@ func (AuditLog) TableName() string { return "audit_logs" }
 
 // insertTenant inserts a tenants row directly via admin DB (bypasses RLS).
 // Returns the UUID used.
+// slug is derived from the name to satisfy the NOT NULL constraint added in 00002_auth.sql.
 func insertTenant(t *testing.T, adminDB *gorm.DB, name string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	// Derive a unique slug from the UUID to avoid UNIQUE conflicts across test runs.
+	slug := "slug-" + id.String()
 	err := adminDB.Exec(
-		"INSERT INTO tenants (id, name, plan_code, status) VALUES (?, ?, ?, ?)",
-		id, name, "free", "active",
+		"INSERT INTO tenants (id, name, plan_code, status, slug) VALUES (?, ?, ?, ?, ?)",
+		id, name, "free", "active", slug,
 	).Error
 	require.NoError(t, err, "insertTenant %s", name)
 	return id

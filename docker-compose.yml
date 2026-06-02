@@ -53,6 +53,13 @@ services:
       # 起動時に goose マイグレーションを実行する (dev では true)
       MIGRATE_ON_STARTUP: "true"
 
+      # セッション Cookie 設定 (P1.3a 認証インフラ)
+      # 本番では SESSION_COOKIE_SECURE=true に変更すること
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-hr_session}
+      SESSION_TTL: ${SESSION_TTL:-24h}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-lax}
+
       GIN_MODE: "debug"
     ports:
       - "8080:8080"
