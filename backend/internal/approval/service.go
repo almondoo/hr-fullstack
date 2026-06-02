@@ -127,64 +127,108 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput) (*ApprovalRequest,
 	}
 
 	if err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
-		// Resolve route: prefer department-scoped, fall back to tenant-wide.
-		route, steps, err := resolveRoute(tx, in.TenantID, in.RequestType, in.DepartmentID)
-		if err != nil {
-			return err
-		}
-		if len(steps) == 0 {
-			return ErrRouteEmpty
-		}
-
-		req.RouteID = route.ID
-		req.CurrentStep = 0
-
-		if err := tx.Exec(
-			`INSERT INTO approval_requests
-			   (id, tenant_id, request_type, subject_ref, requested_by_user_id,
-			    route_id, current_step, status, payload_json)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`,
-			req.ID, req.TenantID, req.RequestType, req.SubjectRef,
-			req.RequestedByUserID, req.RouteID, req.CurrentStep,
-			req.Status, req.PayloadJSON,
-		).Error; err != nil {
-			return fmt.Errorf("approval: submit insert request: %w", err)
-		}
-
-		// Insert all step rows up-front.
-		for _, step := range steps {
-			stepID := uuid.New()
-			var approverUserID *uuid.UUID
-			if step.UserID != nil {
-				approverUserID = step.UserID
-			}
-			if err := tx.Exec(
-				`INSERT INTO approval_steps
-				   (id, tenant_id, request_id, step_index, approver_user_id, decision)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
-				stepID, in.TenantID, req.ID, step.Step, approverUserID, DecisionPending,
-			).Error; err != nil {
-				return fmt.Errorf("approval: submit insert step %d: %w", step.Step, err)
-			}
-		}
-
-		reqIDStr := req.ID.String()
-		if err := audit.Record(tx, audit.Entry{
-			TenantID:     in.TenantID,
-			UserID:       &in.ActorID,
-			Action:       "approval.submitted",
-			ResourceType: "approval_request",
-			ResourceID:   &reqIDStr,
-			IP:           in.IP,
-		}); err != nil {
-			return fmt.Errorf("approval: submit audit: %w", err)
-		}
-		return nil
+		return submitInTx(tx, in.TenantID, in.ActorID, in.IP, in.DepartmentID, &req)
 	}); err != nil {
 		return nil, err
 	}
 
 	return &req, nil
+}
+
+// SubmitTx performs the same route-resolution and approval_request/step INSERT
+// as Submit, but operates on the provided *gorm.DB transaction rather than
+// opening a new WithinTenant transaction.  The caller is responsible for
+// ensuring that tx is already scoped to in.TenantID (i.e. app.tenant_id is
+// already set via SET LOCAL).
+//
+// This variant exists so that other domains (e.g. leave) can include approval
+// submission atomically within their own transaction, preventing orphaned
+// approval_request rows when the outer transaction rolls back.
+func (s *Service) SubmitTx(tx *gorm.DB, in SubmitInput) (*ApprovalRequest, error) {
+	if err := validatePayload(in.PayloadJSON); err != nil {
+		return nil, err
+	}
+
+	payload := in.PayloadJSON
+	if len(payload) == 0 || string(payload) == "null" {
+		payload = []byte(`{}`)
+	}
+
+	req := ApprovalRequest{
+		ID:                uuid.New(),
+		TenantID:          in.TenantID,
+		RequestType:       in.RequestType,
+		SubjectRef:        in.SubjectRef,
+		RequestedByUserID: in.ActorID,
+		Status:            StatusPending,
+		PayloadJSON:       payload,
+	}
+
+	if err := submitInTx(tx, in.TenantID, in.ActorID, in.IP, in.DepartmentID, &req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+// submitInTx is the shared implementation used by both Submit and SubmitTx.
+// It resolves the approval route and inserts approval_request + approval_step
+// rows using the provided tx.  req must be pre-populated with ID, TenantID,
+// RequestType, SubjectRef, RequestedByUserID, Status, and PayloadJSON.
+// departmentID is used for route resolution (department-scoped first, tenant-wide fallback).
+func submitInTx(tx *gorm.DB, tenantID, actorID uuid.UUID, ip *string, departmentID *uuid.UUID, req *ApprovalRequest) error {
+	// Resolve route: prefer department-scoped, fall back to tenant-wide.
+	route, steps, err := resolveRoute(tx, tenantID, req.RequestType, departmentID)
+	if err != nil {
+		return err
+	}
+	if len(steps) == 0 {
+		return ErrRouteEmpty
+	}
+
+	req.RouteID = route.ID
+	req.CurrentStep = 0
+
+	if err := tx.Exec(
+		`INSERT INTO approval_requests
+		   (id, tenant_id, request_type, subject_ref, requested_by_user_id,
+		    route_id, current_step, status, payload_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`,
+		req.ID, req.TenantID, req.RequestType, req.SubjectRef,
+		req.RequestedByUserID, req.RouteID, req.CurrentStep,
+		req.Status, req.PayloadJSON,
+	).Error; err != nil {
+		return fmt.Errorf("approval: submit insert request: %w", err)
+	}
+
+	// Insert all step rows up-front.
+	for _, step := range steps {
+		stepID := uuid.New()
+		var approverUserID *uuid.UUID
+		if step.UserID != nil {
+			approverUserID = step.UserID
+		}
+		if err := tx.Exec(
+			`INSERT INTO approval_steps
+			   (id, tenant_id, request_id, step_index, approver_user_id, decision)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			stepID, tenantID, req.ID, step.Step, approverUserID, DecisionPending,
+		).Error; err != nil {
+			return fmt.Errorf("approval: submit insert step %d: %w", step.Step, err)
+		}
+	}
+
+	reqIDStr := req.ID.String()
+	if err := audit.Record(tx, audit.Entry{
+		TenantID:     tenantID,
+		UserID:       &actorID,
+		Action:       "approval.submitted",
+		ResourceType: "approval_request",
+		ResourceID:   &reqIDStr,
+		IP:           ip,
+	}); err != nil {
+		return fmt.Errorf("approval: submit audit: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ import (
 	internalauth "github.com/your-org/hr-saas/internal/auth"
 	"github.com/your-org/hr-saas/internal/department"
 	"github.com/your-org/hr-saas/internal/employee"
+	"github.com/your-org/hr-saas/internal/leave"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
@@ -236,7 +237,11 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		attendance.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 
 		// --- Approval workflow routes (申請承認) ---
+		approvalSvc := approval.NewService(deps.TenantDB)
 		approval.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- Leave routes (休暇 / 年休 LM-040/041/042/043) ---
+		leave.RegisterRoutes(v1, deps.TenantDB, approvalSvc, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}
