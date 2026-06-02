@@ -153,6 +153,8 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 			CORSAllowOrigins:    "https://example.com",
 			DBAdminUser:         "postgres",
 			SessionCookieSecure: true,
+			// 64 hex chars = 32 bytes, placeholder value safe for tests.
+			CSRFAuthKey: "0000000000000000000000000000000000000000000000000000000000000001",
 		}
 		err := cfg.validate()
 		if err != nil {
@@ -169,6 +171,8 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 			CORSAllowOrigins:    "https://example.com",
 			AdminDatabaseURL:    "postgres://postgres:secret@db:5432/hr_saas",
 			SessionCookieSecure: true,
+			// 64 hex chars = 32 bytes, placeholder value safe for tests.
+			CSRFAuthKey: "0000000000000000000000000000000000000000000000000000000000000001",
 		}
 		err := cfg.validate()
 		if err != nil {

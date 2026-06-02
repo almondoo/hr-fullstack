@@ -23,10 +23,12 @@ import (
 	"syscall"
 	"time"
 
+	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/logging"
 	"github.com/your-org/hr-saas/internal/platform/migrate"
+	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 	"github.com/your-org/hr-saas/internal/server"
 )
 
@@ -89,12 +91,20 @@ func main() {
 	defer sqlDB.Close()
 
 	// --- 5. Router ---
-	router := server.New(cfg, database, logger)
+	tdb := tenantdb.New(database)
+	sessionStore := platformauth.NewSessionStore()
+	deps := server.Deps{
+		AppDB:        database,
+		TenantDB:     tdb,
+		SessionStore: sessionStore,
+	}
+	router := server.New(cfg, deps, logger)
 
 	// --- 6. HTTP Server ---
+	// Use server.Handler(router) to get the CSRF-wrapped handler.
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           router,
+		Handler:           server.Handler(router),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris mitigation
 	}
 

@@ -41,9 +41,8 @@ func TestHealthzReturns200(t *testing.T) {
 	cfg := newTestConfig()
 	logger := logging.New(cfg.AppEnv)
 
-	// Pass nil for the *gorm.DB — healthz never touches it.
-	// readyz is not exercised here, so nil is safe.
-	router := server.New(cfg, nil, logger)
+	// Pass zero Deps — healthz never touches the database.
+	router := server.New(cfg, server.Deps{}, logger)
 	require.NotNil(t, router)
 
 	w := httptest.NewRecorder()
@@ -63,7 +62,7 @@ func TestHealthzResponseHeaders(t *testing.T) {
 
 	cfg := newTestConfig()
 	logger := logging.New(cfg.AppEnv)
-	router := server.New(cfg, nil, logger)
+	router := server.New(cfg, server.Deps{}, logger)
 
 	w := httptest.NewRecorder()
 	req, err := http.NewRequest(http.MethodGet, "/healthz", nil)
@@ -83,7 +82,7 @@ func TestRequestIDPropagation(t *testing.T) {
 
 	cfg := newTestConfig()
 	logger := logging.New(cfg.AppEnv)
-	router := server.New(cfg, nil, logger)
+	router := server.New(cfg, server.Deps{}, logger)
 
 	const testID = "test-correlation-id-123"
 
@@ -105,7 +104,7 @@ func TestRequestIDGenerated(t *testing.T) {
 
 	cfg := newTestConfig()
 	logger := logging.New(cfg.AppEnv)
-	router := server.New(cfg, nil, logger)
+	router := server.New(cfg, server.Deps{}, logger)
 
 	w := httptest.NewRecorder()
 	req, err := http.NewRequest(http.MethodGet, "/healthz", nil)

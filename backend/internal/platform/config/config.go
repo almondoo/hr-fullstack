@@ -95,6 +95,23 @@ type Config struct {
 	// cookie.  Accepted values: "lax" (default), "strict", "none".
 	// "none" requires Secure=true in modern browsers.
 	SessionCookieSameSite string `env:"SESSION_COOKIE_SAMESITE" envDefault:"lax"`
+
+	// --- CSRF ---
+	// CSRFAuthKey is a 32-byte hex-encoded key used by gorilla/csrf.
+	// Required in non-development environments.
+	// In development a random key is generated at startup when this is unset.
+	// NEVER set the real value here; load from env or secrets manager.
+	CSRFAuthKey string `env:"CSRF_AUTH_KEY"`
+
+	// CSRFSecure sets the Secure attribute on the CSRF cookie.
+	// Should match SessionCookieSecure.
+	CSRFSecure bool `env:"CSRF_SECURE" envDefault:"false"`
+
+	// --- Rate limiting ---
+	// AuthRateLimit is the rate limit for login and signup endpoints.
+	// Format accepted by ulule/limiter: "10-M" (10 per minute), "100-H" (100 per hour).
+	// Defaults to 10 per minute.
+	AuthRateLimit string `env:"AUTH_RATE_LIMIT" envDefault:"10-M"`
 }
 
 // Load reads Config from environment variables.
@@ -217,6 +234,19 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Errorf(
 			"SESSION_COOKIE_SAMESITE %q must be one of: lax, strict, none",
 			c.SessionCookieSameSite,
+		))
+	}
+
+	// In non-development environments CSRF_AUTH_KEY must be set to a 32-byte
+	// hex-encoded value (64 hex chars) to ensure CSRF token security.
+	if !c.IsDevelopment() && c.CSRFAuthKey == "" {
+		errs = append(errs, errors.New(
+			"CSRF_AUTH_KEY must be set in non-development environments"))
+	}
+	if c.CSRFAuthKey != "" && len(c.CSRFAuthKey) != 64 {
+		errs = append(errs, fmt.Errorf(
+			"CSRF_AUTH_KEY must be exactly 64 hex characters (32 bytes); got %d characters",
+			len(c.CSRFAuthKey),
 		))
 	}
 
