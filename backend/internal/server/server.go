@@ -39,6 +39,7 @@ import (
 	"github.com/ulule/limiter/v3/drivers/store/memory"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/approval"
 	"github.com/your-org/hr-saas/internal/attendance"
 	internalauth "github.com/your-org/hr-saas/internal/auth"
 	"github.com/your-org/hr-saas/internal/department"
@@ -233,6 +234,9 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 
 		// --- Attendance routes (勤怠 / 36協定) ---
 		attendance.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- Approval workflow routes (申請承認) ---
+		approval.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}

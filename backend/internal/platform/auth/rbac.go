@@ -14,6 +14,44 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
 
+// LoadUserPermissions fetches the permission slice for userID within the
+// already-open tenant transaction tx.  Callers that need to perform an
+// in-service RBAC check (e.g. approval engine checking approval:admin) should
+// use this rather than duplicating the role-lookup logic.
+//
+// Returns an empty slice (not an error) when the user has no role assigned.
+// RLS is enforced by the caller's WithinTenant context; the explicit
+// tenant_id conditions are an additional defence-in-depth layer.
+func LoadUserPermissions(tx *gorm.DB, tenantID, userID uuid.UUID) ([]string, error) {
+	var ur userRoleRow
+	if err := tx.Raw(
+		`SELECT role_id FROM users WHERE id = ? AND tenant_id = ? LIMIT 1`,
+		userID, tenantID,
+	).Scan(&ur).Error; err != nil {
+		return nil, fmt.Errorf("rbac: load user role: %w", err)
+	}
+	if ur.RoleID == nil {
+		return nil, nil
+	}
+
+	var rr roleRow
+	if err := tx.Raw(
+		`SELECT permissions FROM roles WHERE id = ? AND tenant_id = ? LIMIT 1`,
+		ur.RoleID, tenantID,
+	).Scan(&rr).Error; err != nil {
+		return nil, fmt.Errorf("rbac: load role permissions: %w", err)
+	}
+	if len(rr.Permissions) == 0 {
+		return nil, nil
+	}
+
+	var pj permissionsJSON
+	if err := json.Unmarshal(rr.Permissions, &pj); err != nil {
+		return nil, fmt.Errorf("rbac: parse permissions json: %w", err)
+	}
+	return pj.Perms, nil
+}
+
 // permissionsJSON is the shape of the roles.permissions jsonb column.
 // Example: {"perms":["employee:read","employee:write"]}
 // The wildcard "*" grants all permissions.
