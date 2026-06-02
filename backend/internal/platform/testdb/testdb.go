@@ -128,7 +128,7 @@ func NewHarness(t *testing.T) *Harness {
 	}
 
 	adminGORM, err := gorm.Open(postgres.Open(adminDSN), &gorm.Config{
-		Logger:               silentLogger,
+		Logger:                 silentLogger,
 		SkipDefaultTransaction: true,
 	})
 	if err != nil {
@@ -164,7 +164,7 @@ func NewHarness(t *testing.T) *Harness {
 	}
 
 	appGORM, err := gorm.Open(postgres.Open(appDSN), &gorm.Config{
-		Logger:               silentLogger,
+		Logger:                 silentLogger,
 		SkipDefaultTransaction: true,
 	})
 	if err != nil {

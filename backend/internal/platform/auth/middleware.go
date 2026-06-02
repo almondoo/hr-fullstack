@@ -67,12 +67,12 @@ func RequireAuth(
 // code and human-readable message.  The code is stable across releases so
 // clients can key on it; the message is informational only.
 func sessionErrToHTTP(err error) (code, message string) {
-	switch {
-	case err == ErrSessionNotFound:
+	switch err {
+	case ErrSessionNotFound:
 		return "UNAUTHENTICATED", "session not found"
-	case err == ErrSessionExpired:
+	case ErrSessionExpired:
 		return "SESSION_EXPIRED", "session has expired"
-	case err == ErrSessionRevoked:
+	case ErrSessionRevoked:
 		return "SESSION_REVOKED", "session has been revoked"
 	default:
 		return "UNAUTHENTICATED", "authentication required"

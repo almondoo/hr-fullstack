@@ -26,8 +26,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/audit"
+	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/httpx"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
@@ -36,18 +36,6 @@ import (
 // ---------------------------------------------------------------------------
 // Model shapes (GORM, mapped to DB columns)
 // ---------------------------------------------------------------------------
-
-type dbTenant struct {
-	ID        uuid.UUID `gorm:"column:id;primaryKey"`
-	Name      string    `gorm:"column:name"`
-	PlanCode  string    `gorm:"column:plan_code"`
-	Status    string    `gorm:"column:status"`
-	Slug      string    `gorm:"column:slug"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
-}
-
-func (dbTenant) TableName() string { return "tenants" }
 
 type dbUser struct {
 	ID               uuid.UUID  `gorm:"column:id;primaryKey"`
@@ -63,6 +51,7 @@ type dbUser struct {
 	UpdatedAt        time.Time  `gorm:"column:updated_at"`
 }
 
+// TableName maps dbUser to the users table.
 func (dbUser) TableName() string { return "users" }
 
 type dbRole struct {
@@ -74,6 +63,7 @@ type dbRole struct {
 	UpdatedAt   time.Time `gorm:"column:updated_at"`
 }
 
+// TableName maps dbRole to the roles table.
 func (dbRole) TableName() string { return "roles" }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +71,9 @@ func (dbRole) TableName() string { return "roles" }
 // ---------------------------------------------------------------------------
 
 const (
-	maxFailedLogins  = 5
-	lockoutDuration  = 30 * time.Minute
-	minPasswordLen   = 8
+	maxFailedLogins = 5
+	lockoutDuration = 30 * time.Minute
+	minPasswordLen  = 8
 )
 
 var (
@@ -546,12 +536,12 @@ func (s *Service) Logout(c *gin.Context) {
 
 // MeResponse is the JSON response for GET /api/v1/auth/me.
 type MeResponse struct {
-	UserID      uuid.UUID `json:"user_id"`
-	TenantID    uuid.UUID `json:"tenant_id"`
-	Email       string    `json:"email"`
+	UserID      uuid.UUID  `json:"user_id"`
+	TenantID    uuid.UUID  `json:"tenant_id"`
+	Email       string     `json:"email"`
 	RoleID      *uuid.UUID `json:"role_id,omitempty"`
-	RoleName    *string   `json:"role_name,omitempty"`
-	Permissions []string  `json:"permissions"`
+	RoleName    *string    `json:"role_name,omitempty"`
+	Permissions []string   `json:"permissions"`
 }
 
 // Me returns the current authenticated user's profile.

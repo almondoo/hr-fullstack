@@ -28,23 +28,47 @@
 - [ ] `.env.example` の値がすべてプレースホルダ（実値が無い）
 - [ ] ソース・設定・テスト・fixtureに実PII / 実トークン / 本番接続情報が無い
 - [ ] コミット履歴にも秘密が含まれていない（過去コミットも対象）
-- [ ] **シークレットスキャンを実行**：`gitleaks detect`（または `trufflehog`）でクリーン
-- [ ] GitHub の **Secret scanning + Push protection** を有効化
-- [ ] CI に `gitleaks` / 依存脆弱性チェック（`govulncheck` / `pnpm audit`）を組込み
+- [ ] GitHub の **Secret scanning + Push protection** を有効化（Settings → Code security）
+- [ ] CI に依存脆弱性チェック（`govulncheck` / `pnpm audit`）を組込み済み（`.github/workflows/ci.yml` 参照）
+- [ ] 必要に応じ `ugrep` でローカルパターン検索を実施
 - [ ] `pre-commit` フックでコミット前スキャン（任意だが推奨）
 
-## 推奨：自動チェックの導入
+## 秘密混入防止方針
+
+本プロジェクトでは **gitleaks は使用しない**。代わりに以下の三層で秘密の混入を防ぐ。
+
+| 層 | 手段 | タイミング |
+|---|---|---|
+| 1. コードレビュー | PR レビュー時に目視確認 | push 前後 |
+| 2. ローカル検索 | `ugrep -r` でパターン検索 | コミット前（任意） |
+| 3. GitHub 機能 | Secret scanning + Push Protection | push 時（自動） |
+
+### GitHub Secret scanning + Push Protection の有効化（必須）
+
+リポジトリを公開する前に、リポジトリ管理者が以下を行うこと：
+
+1. GitHub リポジトリの **Settings → Code security** を開く
+2. **Secret scanning** を ON にする
+3. **Push protection** を ON にする
+
+Push Protection が有効な場合、GitHub が既知のシークレットパターンを検出すると push がブロックされる。
+
+### ローカルでのパターン確認例（ugrep）
 
 ```bash
-# ローカルでの秘密スキャン例
-gitleaks detect --source . --redact
-
-# 依存脆弱性
-cd backend && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-# (frontend) pnpm audit
+# API キーやトークンらしき文字列を検索
+ugrep -r --include='*.go' --include='*.ts' --include='*.env*' \
+  '[A-Za-z0-9_]{20,}' . | grep -v '.env.example'
 ```
 
-GitHub 側では Settings → Code security で **Secret scanning** と **Push protection** を ON に。
+### 依存脆弱性チェック
+
+```bash
+# Go
+cd backend && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+# Frontend
+cd frontend && pnpm audit --audit-level=high
+```
 
 ## 誤って秘密をコミット/公開してしまったら
 

@@ -43,16 +43,17 @@ var (
 // Only the columns needed by middleware are modelled here; additional columns
 // (ip, last_used_at) are written via targeted UPDATE queries.
 type Session struct {
-	ID          uuid.UUID  `gorm:"column:id;primaryKey"`
-	TenantID    uuid.UUID  `gorm:"column:tenant_id"`
-	UserID      uuid.UUID  `gorm:"column:user_id"`
-	TokenHash   string     `gorm:"column:token_hash"`
-	ExpiresAt   time.Time  `gorm:"column:expires_at"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
-	LastUsedAt  *time.Time `gorm:"column:last_used_at"`
-	RevokedAt   *time.Time `gorm:"column:revoked_at"`
+	ID         uuid.UUID  `gorm:"column:id;primaryKey"`
+	TenantID   uuid.UUID  `gorm:"column:tenant_id"`
+	UserID     uuid.UUID  `gorm:"column:user_id"`
+	TokenHash  string     `gorm:"column:token_hash"`
+	ExpiresAt  time.Time  `gorm:"column:expires_at"`
+	CreatedAt  time.Time  `gorm:"column:created_at"`
+	LastUsedAt *time.Time `gorm:"column:last_used_at"`
+	RevokedAt  *time.Time `gorm:"column:revoked_at"`
 }
 
+// TableName maps Session to the sessions table.
 func (Session) TableName() string { return "sessions" }
 
 // sessionRow is the minimal shape returned by auth_resolve_session.

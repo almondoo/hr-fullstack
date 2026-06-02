@@ -56,6 +56,7 @@ type auditRow struct {
 	Seq          int64      `gorm:"column:seq"`
 }
 
+// TableName maps auditRow to the audit_logs table.
 func (auditRow) TableName() string { return "audit_logs" }
 
 // Record writes a single audit entry within the provided transaction tx.

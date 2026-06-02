@@ -1,0 +1,162 @@
+# golangci-lint v2 configuration
+# Schema reference: https://golangci-lint.run/usage/configuration/
+version: "2"
+
+run:
+  timeout: 5m
+  # go-version is derived from go.mod automatically in v2.
+  issues-exit-code: 1
+  tests: true
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-issued-lines: true
+      print-linter-name: true
+      colors: true
+
+linters:
+  # Disable the default set so we control exactly what runs.
+  default: none
+  enable:
+    # ── Correctness ──────────────────────────────────────────────
+    - govet          # go vet passes (shadow, printf, …)
+    - staticcheck    # SA* + S* + QF* checks (supersedes megacheck)
+    - errcheck       # ensure errors are not silently discarded
+    - ineffassign    # assignment to variable never used afterward
+    - unused         # unused code (replaces deadcode/structcheck/varcheck)
+    # ── Style / readability ──────────────────────────────────────
+    - revive         # fast, configurable replacement for golint
+    - gocritic       # additional code-smell checks
+    # ── Security ─────────────────────────────────────────────────
+    - gosec          # G-code security checks (SQL injection, weak crypto…)
+    # ── Maintainability ──────────────────────────────────────────
+    - misspell       # common English misspellings in comments/strings
+    - whitespace     # leading/trailing blank lines
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment: too noisy for early-stage code.
+        - fieldalignment
+        # shadow: err-shadowing via short-variable-declaration in if-blocks is
+        # idiomatic Go; the checker produces too many false positives.
+        - shadow
+
+    staticcheck:
+      checks: ["all"]
+
+    errcheck:
+      # Allow ignoring errors from fmt.Print* and deferred Close() where the
+      # main operation has already succeeded (standard Go idiom).
+      exclude-functions:
+        - fmt.Print
+        - fmt.Println
+        - fmt.Fprintf
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (*os.File).Close
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+        - name: var-naming
+        - name: error-return
+        - name: error-strings
+        - name: if-return
+        - name: increment-decrement
+        - name: range
+        # blank-imports: pgx stdlib driver registration in non-main packages is
+        # an intentional side-effect import pattern; suppress the warning.
+        - name: blank-imports
+          disabled: true
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+      disabled-checks:
+        # httpNoBody fires on test helpers that pass nil.
+        - httpNoBody
+        # unnamedResult: too many false positives in handler return signatures.
+        - unnamedResult
+        # exitAfterDefer: deferred cleanup before os.Exit is intentional in
+        # startup/shutdown paths (e.g. main.go, cmd/migrate).
+        - exitAfterDefer
+        # paramTypeCombine: combining uuid.UUID return types is a style micro-
+        # optimisation; readability with explicit names is preferable here.
+        - paramTypeCombine
+
+    gosec:
+      excludes:
+        # G104 (unchecked error) duplicates errcheck; let errcheck own it.
+        - G104
+        # G115 (int→uint32 overflow) fires on argon2 parameter assignment
+        # where len(salt)/len(key) are bounded to safe values by construction.
+        - G115
+        # G124 (insecure cookie attributes) fires on session-deletion helpers
+        # that intentionally emit an expired blank cookie to clear the client
+        # state; the main session cookie is set with Secure+HttpOnly elsewhere.
+        - G124
+      config:
+        global:
+          audit: false
+
+    misspell:
+      # This project uses British English in comments; switch misspell locale
+      # so "cancelled", "authorised", "defence" etc. are not flagged.
+      locale: UK
+
+  exclusions:
+    rules:
+      # Test files: relax errcheck, gosec, and unused.
+      # Helper types/functions defined locally for test setup are often
+      # unreferenced outside the test binary (e.g. stub DB model structs).
+      - path: "_test\\.go$"
+        linters:
+          - errcheck
+          - gosec
+          - unused
+
+      # testdb helpers are test-only infrastructure; credential-like strings
+      # (e.g. "postgres_test_admin") are synthetic test values, not real secrets.
+      - path: "internal/platform/testdb/"
+        linters:
+          - gosec
+
+      # Generated migration embed file has no doc comments.
+      - path: "db/migrations\\.go$"
+        linters:
+          - revive
+
+      # main.go wires everything; some direct os.Exit calls and unchecked
+      # os.Stderr.WriteString are intentional in the startup-failure path.
+      - path: "^main\\.go$"
+        linters:
+          - revive
+          - errcheck
+
+      # cmd/migrate: thin CLI entry point with intentional os.Exit calls.
+      - path: "cmd/migrate/"
+        linters:
+          - errcheck
+
+      # GORM model types use unexported structs with exported TableName()
+      # methods; the comment requirement for this pattern is impractical.
+      - text: "exported method .* TableName should have comment"
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt          # canonical Go formatting
+
+issues:
+  # Show all issues (do not cap at 3 per linter).
+  max-issues-per-linter: 0
+  max-same-issues: 0

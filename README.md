@@ -91,8 +91,9 @@ curl http://localhost:8080/readyz    # {"status":"ready"}（DB接続OK時）
 ## セキュリティ / 公開前
 
 - 秘密は環境変数 / Secret Manager。`.env` はコミットしない（`.gitignore` 済み）。
-- 公開前に **`gitleaks detect --source .`** を実行し、GitHub の Secret scanning + Push protection を有効化。
-- CI に `govulncheck`（Go）/ `pnpm audit`（FE）を組込み。
+- gitleaks は使わず、**レビュー＋ugrep＋GitHub Push Protection** で秘密混入を防ぐ（詳細は SECURITY.md）。
+- 公開前に GitHub の **Secret scanning + Push protection** を有効化すること（Settings → Code security）。
+- CI に `govulncheck`（Go）/ `pnpm audit`（FE）を組込み済み（`.github/workflows/ci.yml`）。
 - 法令・制度の記述は 2025–2026 時点の一般情報の要約。実装時は社労士・弁護士と一次情報で確認。
 
 詳細は [SECURITY.md](./SECURITY.md)。

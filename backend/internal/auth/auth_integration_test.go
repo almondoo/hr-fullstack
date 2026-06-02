@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
-	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/audit"
+	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 	"github.com/your-org/hr-saas/internal/platform/testdb"
@@ -399,8 +399,8 @@ func TestLogout_RevokesSession(t *testing.T) {
 
 	// Logout.
 	csrfTok, csrfCookies := csrfToken(t, handler)
-	allCookies := append(csrfCookies, sessionCookie)
-	wLogout := postJSON(t, handler, "/api/v1/auth/logout", nil, allCookies, csrfTok)
+	csrfCookies = append(csrfCookies, sessionCookie)
+	wLogout := postJSON(t, handler, "/api/v1/auth/logout", nil, csrfCookies, csrfTok)
 	assert.Equal(t, http.StatusOK, wLogout.Code, "logout: %s", wLogout.Body.String())
 
 	// /me should now return 401.
@@ -1124,17 +1124,16 @@ func TestSignupValidation_InvalidSlug(t *testing.T) {
 	cfg := newTestConfig()
 	handler := newTestServer(h, cfg)
 
-	csrfTok, csrfCookies := csrfToken(t, handler)
 	cases := []string{
-		"AB",          // uppercase
-		"a",           // too short
-		"-start",      // starts with hyphen
-		"end-",        // ends with hyphen
-		"has space",   // space
+		"AB",                    // uppercase
+		"a",                     // too short
+		"-start",                // starts with hyphen
+		"end-",                  // ends with hyphen
+		"has space",             // space
 		strings.Repeat("a", 64), // too long
 	}
 	for _, slug := range cases {
-		csrfTok, csrfCookies = csrfToken(t, handler)
+		csrfTok, csrfCookies := csrfToken(t, handler)
 		w := postJSON(t, handler, "/api/v1/auth/signup", map[string]string{
 			"tenant_name": "X",
 			"slug":        slug,

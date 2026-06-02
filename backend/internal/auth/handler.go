@@ -24,7 +24,9 @@ func RegisterRoutes(
 	rg *gin.RouterGroup,
 	svc *Service,
 	store *platformauth.SessionStore,
-	appDB interface{ WithContext(ctx interface{}) interface{} }, // unused here, kept for doc
+	appDB interface {
+		WithContext(ctx interface{}) interface{}
+	}, // unused here, kept for doc
 	tdb *tenantdb.TenantDB,
 	cookieName string,
 	requireAuth gin.HandlerFunc,

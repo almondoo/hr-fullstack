@@ -15,6 +15,7 @@
 //     (id = tenant_id) succeeds.
 //  9. Concurrent goroutines each see only their own tenant's rows (no leakage
 //     across pool connections).
+//
 // 10. A panic inside fn is propagated and the transaction is rolled back.
 package tenantdb_test
 
@@ -476,9 +477,10 @@ func TestWithinTenantConcurrentIsolation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestWithinTenantPanicRollback verifies that when fn panics:
-//  (a) the panic is propagated to the caller, and
-//  (b) the transaction is rolled back so that the inserted row is not
-//      committed and is not visible via the admin DB.
+//
+//	(a) the panic is propagated to the caller, and
+//	(b) the transaction is rolled back so that the inserted row is not
+//	    committed and is not visible via the admin DB.
 func TestWithinTenantPanicRollback(t *testing.T) {
 	h := testdb.NewHarness(t)
 	ctx := context.Background()
