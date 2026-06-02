@@ -7,16 +7,20 @@ services:
     image: postgres:17-alpine
     container_name: hr-saas-db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-hr_app}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
       # パスワードはデフォルトを設けず、未設定なら起動失敗させる（安全側）
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:-hr_saas}
+      # hr_app ロール作成スクリプト(10-create-app-role.sh)が使用するパスワード
+      HR_APP_DB_PASSWORD: ${HR_APP_DB_PASSWORD:?HR_APP_DB_PASSWORD must be set in .env}
     ports:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      # initdb スクリプト: hr_app ロールをコンテナ初回起動時に作成する
+      - ./backend/db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hr_app} -d ${POSTGRES_DB:-hr_saas}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-hr_saas}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -30,9 +34,25 @@ services:
     # 初回は go.mod を解決してから Air を起動（依存はリポジトリの import から自動解決）
     command: sh -c "go mod tidy && air -c .air.toml"
     environment:
+      APP_ENV: "development"
       APP_PORT: "8080"
-      # ローカル開発のみ sslmode=disable。本番は verify-full 等で TLS 必須。
-      DATABASE_URL: "postgres://${POSTGRES_USER:-hr_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hr_saas}?sslmode=disable"
+      HTTP_PORT: "8080"
+
+      # アプリ用DB接続 (hr_app ロール — NOBYPASSRLS)
+      DB_HOST: "db"
+      DB_PORT: "5432"
+      DB_USER: "hr_app"
+      DB_PASSWORD: ${HR_APP_DB_PASSWORD:?HR_APP_DB_PASSWORD must be set in .env}
+      DB_NAME: ${POSTGRES_DB:-hr_saas}
+      DB_SSLMODE: "disable"
+
+      # 管理/マイグレーション用DB接続 (postgres スーパーユーザー)
+      DB_ADMIN_USER: ${POSTGRES_USER:-postgres}
+      DB_ADMIN_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+
+      # 起動時に goose マイグレーションを実行する (dev では true)
+      MIGRATE_ON_STARTUP: "true"
+
       GIN_MODE: "debug"
     ports:
       - "8080:8080"

@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
@@ -33,6 +34,27 @@ type Config struct {
 	// DATABASE_URL overrides individual DB_* fields when set.
 	// Useful in Docker Compose / hosted environments.
 	DatabaseURL string `env:"DATABASE_URL"`
+
+	// --- Admin / migration credentials ---
+	// DB_ADMIN_USER and DB_ADMIN_PASSWORD identify the superuser role used by
+	// the migrate command and the startup migration runner. They default to the
+	// application credentials when unset so that single-user local setups work
+	// without extra configuration.
+	DBAdminUser     string `env:"DB_ADMIN_USER"`
+	DBAdminPassword string `env:"DB_ADMIN_PASSWORD"`
+
+	// ADMIN_DATABASE_URL overrides individual DB_ADMIN_* fields when set.
+	AdminDatabaseURL string `env:"ADMIN_DATABASE_URL"`
+
+	// --- Migration on startup ---
+	// MigrateOnStartup causes the server to run goose.Up using the admin DSN
+	// before accepting traffic.
+	//
+	// Defaults to false (safe for production).  Development setups should set
+	// MIGRATE_ON_STARTUP=true explicitly (docker-compose.yml does this).
+	// Running auto-migration in production across multiple instances can cause
+	// lock contention; prefer a dedicated pre-deploy migration step instead.
+	MigrateOnStartup bool `env:"MIGRATE_ON_STARTUP" envDefault:"false"`
 
 	// --- CORS ---
 	// CORSAllowOrigins is a comma-separated list of allowed origins.
@@ -66,21 +88,65 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// DSN returns the PostgreSQL data source name.
+// DSN returns the PostgreSQL data source name for the application role (hr_app).
 // If DatabaseURL is set it takes precedence over individual DB_* fields.
+//
+// When constructing from individual fields, each value is encoded into a
+// postgres:// URL so that special characters (spaces, single quotes,
+// backslashes, etc.) in passwords or hostnames are safely percent-encoded.
+// This prevents the connection string from being silently mis-parsed by the
+// libpq keyword parser.
 func (c *Config) DSN() string {
 	if c.DatabaseURL != "" {
 		return c.DatabaseURL
 	}
-	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		c.DBHost, c.DBPort, c.DBUser, c.DBPassword, c.DBName, c.DBSSLMode,
-	)
+	return buildPostgresURL(c.DBHost, c.DBPort, c.DBUser, c.DBPassword, c.DBName, c.DBSSLMode)
 }
 
 // IsDevelopment reports whether the application is running in development mode.
 func (c *Config) IsDevelopment() bool {
 	return c.AppEnv == "development"
+}
+
+// AdminDSN returns the PostgreSQL DSN for the admin / migration role.
+// It uses DB_ADMIN_USER and DB_ADMIN_PASSWORD when set; otherwise falls back
+// to the application credentials (convenient for local single-user setups).
+// ADMIN_DATABASE_URL takes highest precedence when set.
+//
+// Special characters in credentials are safely encoded; see DSN() for details.
+func (c *Config) AdminDSN() string {
+	if c.AdminDatabaseURL != "" {
+		return c.AdminDatabaseURL
+	}
+	adminUser := c.DBAdminUser
+	if adminUser == "" {
+		adminUser = c.DBUser
+	}
+	adminPassword := c.DBAdminPassword
+	if adminPassword == "" {
+		adminPassword = c.DBPassword
+	}
+	return buildPostgresURL(c.DBHost, c.DBPort, adminUser, adminPassword, c.DBName, c.DBSSLMode)
+}
+
+// buildPostgresURL constructs a postgres:// URL from individual connection
+// components.  Using net/url.URL ensures that user and password are
+// percent-encoded, making the DSN safe even when credentials contain spaces,
+// single quotes, backslashes, or other characters that would break the
+// libpq keyword=value format.
+//
+// The resulting URL is accepted by GORM's postgres driver (pgx/v5 underneath).
+func buildPostgresURL(host, port, user, password, dbname, sslmode string) string {
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   host + ":" + port,
+		Path:   "/" + dbname,
+	}
+	q := u.Query()
+	q.Set("sslmode", sslmode)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // validate performs semantic checks beyond what env tag parsing covers.
@@ -99,6 +165,17 @@ func (c *Config) validate() error {
 	// misconfiguration error — fail fast rather than silently reject all requests.
 	if !c.IsDevelopment() && strings.TrimSpace(c.CORSAllowOrigins) == "" {
 		errs = append(errs, errors.New("CORS_ALLOW_ORIGINS must not be empty in non-development environments"))
+	}
+	// In non-development environments, require explicit admin credentials to
+	// avoid running migrations (or inadvertently exposing DDL access) through
+	// the application's hr_app role.  Either DB_ADMIN_USER or
+	// ADMIN_DATABASE_URL must be set.  An empty admin user causes AdminDSN()
+	// to fall back to the application credentials, which is insufficient for
+	// production environments where DDL requires a superuser role.
+	if !c.IsDevelopment() && c.AdminDatabaseURL == "" && c.DBAdminUser == "" {
+		errs = append(errs, errors.New(
+			"non-development environment: either DB_ADMIN_USER or ADMIN_DATABASE_URL must be set "+
+				"(the hr_app role must not be used for migrations)"))
 	}
 
 	return errors.Join(errs...)
