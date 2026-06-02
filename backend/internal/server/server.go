@@ -40,6 +40,8 @@ import (
 	"gorm.io/gorm"
 
 	internalauth "github.com/your-org/hr-saas/internal/auth"
+	"github.com/your-org/hr-saas/internal/department"
+	"github.com/your-org/hr-saas/internal/employee"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
@@ -221,6 +223,12 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		authGroup.POST("/login", rateLimitMW, func(c *gin.Context) { authSvc.Login(c) })
 		authGroup.POST("/logout", requireAuth, func(c *gin.Context) { authSvc.Logout(c) })
 		authGroup.GET("/me", requireAuth, func(c *gin.Context) { authSvc.Me(c) })
+
+		// --- Department routes ---
+		department.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- Employee / assignment / contract routes ---
+		employee.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}
