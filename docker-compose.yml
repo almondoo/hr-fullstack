@@ -1,0 +1,49 @@
+# HR SaaS - 開発用 Docker Compose
+# サービス: api(Go + Gin + Air ホットリロード) / db(PostgreSQL)
+# 注意: これは「ローカル開発用」設定です。本番では TLS・Secret管理・最小権限DBユーザー等を必ず適用してください。
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: hr-saas-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hr_app}
+      # パスワードはデフォルトを設けず、未設定なら起動失敗させる（安全側）
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hr_saas}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hr_app} -d ${POSTGRES_DB:-hr_saas}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: hr-saas-api
+    # 初回は go.mod を解決してから Air を起動（依存はリポジトリの import から自動解決）
+    command: sh -c "go mod tidy && air -c .air.toml"
+    environment:
+      APP_PORT: "8080"
+      # ローカル開発のみ sslmode=disable。本番は verify-full 等で TLS 必須。
+      DATABASE_URL: "postgres://${POSTGRES_USER:-hr_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hr_saas}?sslmode=disable"
+      GIN_MODE: "debug"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app          # ソースをマウントしてホットリロード
+      - go_mod_cache:/go/pkg/mod # モジュールキャッシュを永続化
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  go_mod_cache:

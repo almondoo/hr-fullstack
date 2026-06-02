@@ -1,0 +1,60 @@
+# ============================================================
+# このリポジトリは public 公開前提。秘密情報・個人情報は絶対にコミットしない。
+# 詳細は SECURITY.md を参照。
+# 注意: .gitignore では行末コメントは使えない（# は行頭のみ）。各行はパターンのみ。
+# ============================================================
+
+# --- 秘密情報 / 認証情報（厳守）---
+.env
+.env.*
+# プレースホルダのみのサンプルは追跡を許可（上の .env.* の例外）
+!.env.example
+*.local
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*
+secrets/
+secret*.yaml
+secret*.yml
+credentials.json
+service-account*.json
+gcp-*.json
+# npm/pnpm の認証トークンが入り得る
+.npmrc
+# Terraform の変数/状態（接続情報・鍵を含み得る）
+*.tfvars
+*.tfstate
+*.tfstate.*
+.aws/
+.gcloud/
+
+# --- 個人情報を含み得るローカルデータ（実データは置かない）---
+*.dump
+*.sql.bak
+/data/
+/dumps/
+/seed-local/
+
+# --- Go ---
+backend/tmp/
+*.log
+*.out
+coverage.out
+
+# --- Node / frontend ---
+node_modules/
+frontend/build/
+frontend/.react-router/
+.pnpm-store/
+
+# --- OS / エディタ ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

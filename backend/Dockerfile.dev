@@ -1,0 +1,25 @@
+# 開発用 Dockerfile（ホットリロード）。本番は別途マルチステージの最小イメージを用意してください。
+FROM golang:1.26-alpine
+
+# 純Go依存(gin, pgx)のため CGO 不要。静的ビルドで安全側に。
+ENV CGO_ENABLED=0
+
+# git: go install / go mod tidy に必要。ca-certificates/tzdata: 実行時に必要。
+RUN apk add --no-cache git ca-certificates tzdata
+
+WORKDIR /app
+
+# ホットリロードツール Air（新リポジトリ air-verse/air）。
+# 再現性のため本番運用ではタグ固定を推奨（例: @v1.x.x）。
+RUN go install github.com/air-verse/air@latest
+
+# 依存キャッシュ最適化（存在すればコピー）
+COPY go.mod* go.sum* ./
+RUN go mod download || true
+
+COPY . .
+
+EXPOSE 8080
+
+# compose 側の command で `go mod tidy && air` を実行。単体起動時のフォールバック:
+CMD ["air", "-c", ".air.toml"]
