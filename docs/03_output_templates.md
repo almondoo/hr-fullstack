@@ -35,6 +35,7 @@
    ### 5.2 人事労務(LM)
    ### 5.3 採用管理ATS・オンボーディング(ATS)
    ### 5.4 人事評価・タレマネ(TM)
+   ### 5.5 健康管理・安全衛生(LM-06x)
    （各：ID / 要件 / 優先(M/S/C) / MVP区分 / 受入基準 / 備考）
 ## 6. 非機能要件(NFR)  — 目標値つき
 ## 7. 法令・コンプラ要件(CMP) — 要専門家確認フラグ
@@ -86,7 +87,11 @@
 ### 主要エンティティ チェック（最低限）
 Tenant / Employee / Department(Org) / EmploymentContract / Attendance / LeaveBalance /
 PayrollLink / MyNumber(分離ストア) / Applicant / JobPosting / SelectionStage / Interview /
-Offer / OnboardingTask / Goal / Review / OneOnOne / Skill / Survey / AuditLog / Role / User
+Offer / OnboardingTask / Goal / Review / OneOnOne / Skill / Survey / AuditLog / Role / User /
+HealthCheckup / StressCheck / OccupationalHealth(産業医) /
+LegalLedger(WorkerRoster=労働者名簿 / WageLedger=賃金台帳 / AttendanceBook=出勤簿) /
+WorkRule(就業規則) / LaborAgreement(労使協定・36Agreement) /
+Subscription / Plan / Invoice / TenantProvisioning
 
 ---
 
