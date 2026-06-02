@@ -43,6 +43,7 @@ gcp-*.json
 
 # --- Go ---
 backend/tmp/
+tmp/
 *.log
 *.out
 coverage.out
@@ -52,6 +53,9 @@ node_modules/
 frontend/build/
 frontend/.react-router/
 .pnpm-store/
+
+# --- Git worktrees (Claude Code subagent isolation) ---
+.worktrees/
 
 # --- OS / エディタ ---
 .DS_Store
