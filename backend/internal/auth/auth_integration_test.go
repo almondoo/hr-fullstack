@@ -973,6 +973,147 @@ func TestMe_ReturnsUserProfile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Lock-release counter reset (C-2/I-2)
+// ---------------------------------------------------------------------------
+
+// TestLogin_LockReleaseResetsCounter verifies that after a lockout window has
+// expired, the failed_login_count is reset to 1 (not FailedLoginCount+1) on
+// the first wrong-password attempt after unlock.  This prevents immediate
+// re-locking after a single post-unlock failure.
+func TestLogin_LockReleaseResetsCounter(t *testing.T) {
+	h := testdb.NewHarness(t)
+	cfg := newTestConfig()
+	handler := newTestServer(h, cfg)
+
+	// Signup a new tenant.
+	csrfTok, csrfCookies := csrfToken(t, handler)
+	w := postJSON(t, handler, "/api/v1/auth/signup", map[string]string{
+		"tenant_name": "Unlock Corp",
+		"slug":        "unlock-corp",
+		"email":       "admin@unlock.test",
+		"password":    "correctpassword123",
+	}, csrfCookies, csrfTok)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Drive the account to lockout: 5 wrong-password attempts.
+	for i := 0; i < 5; i++ {
+		ct, cc := csrfToken(t, handler)
+		postJSON(t, handler, "/api/v1/auth/login", map[string]string{
+			"slug":     "unlock-corp",
+			"email":    "admin@unlock.test",
+			"password": "wrongpassword",
+		}, cc, ct)
+	}
+
+	// Confirm lock is set.
+	var lockedUntil *time.Time
+	var failCount int
+	require.NoError(t, h.AdminDB.Raw(
+		"SELECT failed_login_count, locked_until FROM users WHERE email = ?", "admin@unlock.test",
+	).Row().Scan(&failCount, &lockedUntil))
+	require.NotNil(t, lockedUntil)
+	assert.Equal(t, 5, failCount)
+
+	// Simulate lock expiry by moving locked_until into the past.
+	require.NoError(t, h.AdminDB.Exec(
+		"UPDATE users SET locked_until = now() - interval '1 second' WHERE email = ?",
+		"admin@unlock.test",
+	).Error)
+
+	// First wrong-password attempt after unlock.
+	ct2, cc2 := csrfToken(t, handler)
+	w2 := postJSON(t, handler, "/api/v1/auth/login", map[string]string{
+		"slug":     "unlock-corp",
+		"email":    "admin@unlock.test",
+		"password": "wrongpassword",
+	}, cc2, ct2)
+	assert.Equal(t, http.StatusUnauthorized, w2.Code)
+
+	// Counter must be reset to 1 — not 6 — so the account is not immediately
+	// re-locked.
+	var newCount int
+	var newLockedUntil *time.Time
+	require.NoError(t, h.AdminDB.Raw(
+		"SELECT failed_login_count, locked_until FROM users WHERE email = ?", "admin@unlock.test",
+	).Row().Scan(&newCount, &newLockedUntil))
+	assert.Equal(t, 1, newCount, "counter must be reset to 1 after first post-unlock failure")
+	assert.Nil(t, newLockedUntil, "account must not be re-locked after a single post-unlock failure")
+}
+
+// ---------------------------------------------------------------------------
+// Audit seq monotonicity (I-4)
+// ---------------------------------------------------------------------------
+
+// TestAudit_SeqMonotonicityDetected verifies that VerifyChain returns false
+// when audit log rows are re-ordered (non-monotonic seq), detecting deletion
+// or insertion of rows outside of the normal chain order.
+func TestAudit_SeqMonotonicityDetected(t *testing.T) {
+	h := testdb.NewHarness(t)
+	ctx := context.Background()
+	tdb := tenantdb.New(h.AppDB)
+
+	tenantID := uuid.New()
+	require.NoError(t, h.AdminDB.Exec(
+		"INSERT INTO tenants (id, name, plan_code, status, slug) VALUES (?, 'Seq Corp', 'free', 'active', ?)",
+		tenantID, "seq-corp-"+tenantID.String()[:8],
+	).Error)
+
+	userID := uuid.New()
+	require.NoError(t, tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		return tx.Exec(
+			"INSERT INTO users (id, tenant_id, email, status) VALUES (?, ?, 'seq@test.test', 'active')",
+			userID, tenantID,
+		).Error
+	}))
+
+	// Insert 3 audit rows.
+	for i := 0; i < 3; i++ {
+		i := i
+		require.NoError(t, tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+			return audit.Record(tx, audit.Entry{
+				TenantID:     tenantID,
+				UserID:       &userID,
+				Action:       fmt.Sprintf("event.%d", i),
+				ResourceType: "test",
+			})
+		}))
+	}
+
+	// Verify chain is valid before tampering.
+	require.NoError(t, tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		ok, err := audit.VerifyChain(tx, tenantID)
+		if err != nil {
+			return err
+		}
+		require.True(t, ok, "chain must be valid before seq tampering")
+		return nil
+	}))
+
+	// Tamper: swap the seq values of rows 1 and 2 to break monotonicity.
+	// We do this via two updates through AdminDB (bypasses RLS).
+	var seqs []int64
+	require.NoError(t, h.AdminDB.Raw(
+		"SELECT seq FROM audit_logs WHERE tenant_id = ? ORDER BY seq ASC", tenantID.String(),
+	).Scan(&seqs).Error)
+	require.Len(t, seqs, 3)
+
+	// Set seq of row[0] to a very large value to break strict monotonicity.
+	require.NoError(t, h.AdminDB.Exec(
+		`UPDATE audit_logs SET seq = 9999 WHERE tenant_id = ? AND seq = ?`,
+		tenantID.String(), seqs[0],
+	).Error)
+
+	// VerifyChain must now detect non-monotonic seq.
+	var ok bool
+	require.NoError(t, tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		var err error
+		ok, err = audit.VerifyChain(tx, tenantID)
+		return err
+	}))
+	assert.False(t, ok, "non-monotonic seq must fail verification")
+}
+
+// ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
 

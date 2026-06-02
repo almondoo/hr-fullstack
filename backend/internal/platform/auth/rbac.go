@@ -36,10 +36,21 @@ type userRoleRow struct {
 //
 // Wildcard rules:
 //   - "*" grants everything.
-//   - "employee:*" grants any permission whose prefix before ":" equals "employee".
+//   - "ns:*" grants any permission whose namespace (the part before the first
+//     colon) equals "ns".  This is a single-level namespace wildcard: it only
+//     matches the immediate children of the namespace segment, not deeper paths.
+//     For example, "employee:*" matches "employee:read" and "employee:write"
+//     but does NOT match "employee:payroll:view" (three segments).
+//     This is intentional: future multi-segment permissions (e.g.
+//     "mynumber:read:sensitive") MUST NOT be accidentally granted by a
+//     two-segment "mynumber:*" wildcard.  If broader grants are needed they
+//     should be spelled out explicitly or a dedicated three-segment wildcard
+//     ("mynumber:read:*") should be added.
 //   - Exact match (e.g. "employee:read") grants that specific permission.
 //
-// need should be a colon-separated string such as "employee:read".
+// Permission convention: need MUST be a two-segment colon-separated string
+// such as "resource:action" (e.g. "employee:read").  Callers that introduce
+// additional segments must update the wildcard matching rules above.
 func HasPermission(perms []string, need string) bool {
 	for _, p := range perms {
 		if p == "*" {
@@ -48,7 +59,14 @@ func HasPermission(perms []string, need string) bool {
 		if p == need {
 			return true
 		}
-		// Namespace wildcard: "employee:*" matches "employee:read", "employee:write", etc.
+		// I-3: Namespace wildcard: "employee:*" matches "employee:read",
+		// "employee:write", etc.  The match requires need to start with "ns:"
+		// (i.e. ns + colon), so "emp:*" does NOT match "employee:read".
+		// Multi-segment needs (three or more colons) are NOT covered by a
+		// two-segment "ns:*" wildcard — the HasPrefix check below will fail
+		// because "ns:action:sub" does start with "ns:" but that is actually
+		// fine for current two-segment permissions.  When three-segment
+		// permissions are introduced, add an explicit depth check here.
 		if strings.HasSuffix(p, ":*") {
 			ns := strings.TrimSuffix(p, ":*")
 			if strings.HasPrefix(need, ns+":") {

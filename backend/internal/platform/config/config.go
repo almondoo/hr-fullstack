@@ -112,6 +112,23 @@ type Config struct {
 	// Format accepted by ulule/limiter: "10-M" (10 per minute), "100-H" (100 per hour).
 	// Defaults to 10 per minute.
 	AuthRateLimit string `env:"AUTH_RATE_LIMIT" envDefault:"10-M"`
+
+	// --- Trusted proxies ---
+	// TrustedProxies is a comma-separated list of IP addresses or CIDR ranges
+	// that the server trusts to supply accurate X-Forwarded-For / X-Real-IP
+	// headers.  Gin uses this list to determine the real client IP used for
+	// rate-limiting and audit logging.
+	//
+	// When empty (the default), Gin operates in "no proxy trust" mode: it
+	// ignores forwarding headers and uses the direct TCP peer address as the
+	// client IP, which is the safest default.  This prevents an attacker from
+	// spoofing X-Forwarded-For to bypass IP-based rate limiting or pollute the
+	// audit log.
+	//
+	// Set this to the CIDR(s) of your load balancer / reverse proxy in
+	// non-development environments where real client IPs arrive via headers.
+	// Example: "10.0.0.0/8,172.16.0.0/12"
+	TrustedProxies string `env:"TRUSTED_PROXIES"`
 }
 
 // Load reads Config from environment variables.
@@ -248,6 +265,16 @@ func (c *Config) validate() error {
 			"CSRF_AUTH_KEY must be exactly 64 hex characters (32 bytes); got %d characters",
 			len(c.CSRFAuthKey),
 		))
+	}
+
+	// I-7: In non-development environments the CSRF cookie MUST carry the
+	// Secure attribute so it is only transmitted over HTTPS.  A CSRF cookie
+	// sent over plain HTTP allows network-level attackers to steal or replace
+	// it, undermining double-submit cookie protection.
+	// This mirrors the SESSION_COOKIE_SECURE requirement above.
+	if !c.IsDevelopment() && !c.CSRFSecure {
+		errs = append(errs, errors.New(
+			"CSRF_SECURE must be true in non-development environments"))
 	}
 
 	return errors.Join(errs...)

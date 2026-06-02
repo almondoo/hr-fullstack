@@ -107,7 +107,13 @@ func Record(tx *gorm.DB, e Entry) error {
 	rowID := uuid.New()
 
 	// Compute the hash over a deterministic canonical string.
-	// Format: prevHash|action|resource_type|resource_id|user_id|occurred_at(RFC3339Nano)
+	//
+	// I-4: The row's own UUID (rowID) is included in the canonical so that
+	// two otherwise-identical events produce different hashes, and so that
+	// replacing a row with a fabricated one with the same payload but a
+	// different ID is detectable.
+	//
+	// Format: prevHash|id|action|resource_type|resource_id|user_id|occurred_at(RFC3339Nano)
 	resourceID := ""
 	if e.ResourceID != nil {
 		resourceID = *e.ResourceID
@@ -116,8 +122,9 @@ func Record(tx *gorm.DB, e Entry) error {
 	if e.UserID != nil {
 		userIDStr = e.UserID.String()
 	}
-	canonical := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+	canonical := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
 		prevHash,
+		rowID.String(),
 		e.Action,
 		e.ResourceType,
 		resourceID,
@@ -160,6 +167,12 @@ func Record(tx *gorm.DB, e Entry) error {
 // and checks that each row's stored hash matches the re-derived value and that
 // each row's prev_hash equals the preceding row's hash.
 //
+// I-4 enhancements:
+//   - The canonical string includes the row's own ID (UUID), matching Record.
+//     A row whose ID was changed will produce a hash mismatch.
+//   - seq values are verified to be strictly monotonically increasing.
+//     Missing rows (tail deletion) or reordering are detected.
+//
 // Returns (true, nil) when the chain is intact.
 // Returns (false, nil) when a mismatch is detected (possible tampering).
 // Returns (false, err) when a database error occurs.
@@ -179,7 +192,21 @@ func VerifyChain(tx *gorm.DB, tenantID uuid.UUID) (bool, error) {
 	}
 
 	var expectedPrevHash string
+	var expectedSeq int64 = -1 // sentinel: first row has no predecessor
 	for _, row := range rows {
+		// I-4: Verify strict seq monotonicity.
+		// The first row establishes the baseline; every subsequent row must be
+		// strictly greater than the previous seq.
+		if expectedSeq == -1 {
+			expectedSeq = row.Seq
+		} else {
+			if row.Seq <= expectedSeq {
+				// seq is not strictly increasing — reorder or duplicate detected.
+				return false, nil
+			}
+			expectedSeq = row.Seq
+		}
+
 		if row.PrevHash != expectedPrevHash {
 			return false, nil
 		}
@@ -192,8 +219,10 @@ func VerifyChain(tx *gorm.DB, tenantID uuid.UUID) (bool, error) {
 		if row.UserID != nil {
 			userIDStr = row.UserID.String()
 		}
-		canonical := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+		// I-4: Include the row's own UUID in the canonical to match Record().
+		canonical := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
 			row.PrevHash,
+			row.ID.String(),
 			row.Action,
 			row.ResourceType,
 			resourceID,

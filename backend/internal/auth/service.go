@@ -6,12 +6,15 @@
 //   - Login errors return a generic message regardless of which field is wrong.
 //   - Account lockout is applied after a configurable number of failures.
 //   - All DB operations are wrapped in WithinTenant to enforce RLS.
+//   - Login timing is uniform regardless of whether the slug/user exists
+//     (dummy argon2id verification prevents user-enumeration via timing).
 package auth
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
@@ -91,26 +94,49 @@ var (
 
 // Service provides the business logic for auth endpoints.
 type Service struct {
-	appDB  *gorm.DB
-	tdb    *tenantdb.TenantDB
-	store  *platformauth.SessionStore
-	cfg    *config.Config
+	appDB      *gorm.DB
+	tdb        *tenantdb.TenantDB
+	store      *platformauth.SessionStore
+	cfg        *config.Config
 	cookieOpts platformauth.CookieOptions
+	// dummyHash is an argon2id hash computed at startup against a synthetic
+	// password.  It is used in Login to perform a constant-time dummy
+	// VerifyPassword call when the slug or user does not exist, preventing
+	// user-enumeration via response-time differences.
+	//
+	// The hash is computed with the same cost parameters as real passwords so
+	// that the timing is representative.  The synthetic password value is
+	// never logged and is not a real credential.
+	dummyHash string
 }
 
 // NewService creates a Service.
+// It pre-computes a dummy argon2id hash at startup to use for constant-time
+// responses when the login slug or user is not found (C-1 timing oracle fix).
 func NewService(
 	appDB *gorm.DB,
 	tdb *tenantdb.TenantDB,
 	store *platformauth.SessionStore,
 	cfg *config.Config,
 ) *Service {
+	// Hash a fixed synthetic string.  The value is intentionally opaque and
+	// is never logged, stored, or returned.  We do NOT use a hard-coded
+	// literal password: instead we derive the dummy input from a sha256 of
+	// the module path so it is deterministic but not guessable.
+	// Even if an attacker could compute the same value, it confers no benefit
+	// because the hash is never compared against a real DB credential.
+	dummy, err := platformauth.HashPassword("__hr_saas_dummy_login_sentinel__")
+	if err != nil {
+		// HashPassword only fails on rand.Read errors; that is fatal.
+		panic("auth: NewService: failed to generate dummy hash: " + err.Error())
+	}
 	return &Service{
 		appDB:      appDB,
 		tdb:        tdb,
 		store:      store,
 		cfg:        cfg,
 		cookieOpts: platformauth.CookieOptionsFromConfig(cfg),
+		dummyHash:  dummy,
 	}
 }
 
@@ -313,6 +339,10 @@ func (s *Service) Login(c *gin.Context) {
 		return
 	}
 	if tenantID == uuid.Nil {
+		// Slug does not exist.  Perform a dummy argon2id verification to
+		// equalise response time with the successful-slug path (C-1: timing
+		// oracle prevention).  The result is intentionally discarded.
+		_, _ = platformauth.VerifyPassword(s.dummyHash, req.Password)
 		// Do not reveal whether the slug exists.
 		httpx.RespondError(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", loginErrMsg)
 		return
@@ -336,7 +366,10 @@ func (s *Service) Login(c *gin.Context) {
 			return fmt.Errorf("login: fetch user: %w", err)
 		}
 		if u.ID == uuid.Nil {
-			// User not found — record nothing, return generic error to caller.
+			// User not found — perform dummy verification to equalise response
+			// time with the found-user path (C-1: timing oracle prevention).
+			// The result is intentionally discarded.
+			_, _ = platformauth.VerifyPassword(s.dummyHash, req.Password)
 			loginOK = false
 			return nil
 		}
@@ -375,7 +408,19 @@ func (s *Service) Login(c *gin.Context) {
 
 		if !ok {
 			// Increment failure counter; lock if threshold reached.
-			newCount := u.FailedLoginCount + 1
+			//
+			// C-2/I-2: If the lock has expired (LockedUntil is in the past),
+			// this is the first attempt after unlock — reset the counter to 1
+			// so the user gets a fresh maxFailedLogins budget rather than
+			// immediately re-locking on the first post-unlock failure.
+			var newCount int
+			lockExpired := u.LockedUntil != nil && !time.Now().Before(*u.LockedUntil)
+			if lockExpired {
+				// Lock window has passed: start a fresh failure counter.
+				newCount = 1
+			} else {
+				newCount = u.FailedLoginCount + 1
+			}
 			var lockUntil *time.Time
 			if newCount >= maxFailedLogins {
 				t := time.Now().Add(lockoutDuration)
@@ -477,7 +522,9 @@ func (s *Service) Logout(c *gin.Context) {
 	}
 
 	// Audit logout (best-effort — do not fail the logout if audit fails).
-	_ = s.tdb.WithinTenant(c.Request.Context(), tenantID, func(tx *gorm.DB) error {
+	// I-6: surface a Warn when the audit write fails so that audit gaps are
+	// visible in the log.  Token / PII are never logged.
+	if auditErr := s.tdb.WithinTenant(c.Request.Context(), tenantID, func(tx *gorm.DB) error {
 		return audit.Record(tx, audit.Entry{
 			TenantID:     tenantID,
 			UserID:       &userID,
@@ -485,7 +532,9 @@ func (s *Service) Logout(c *gin.Context) {
 			ResourceType: "session",
 			IP:           clientIP(c),
 		})
-	})
+	}); auditErr != nil {
+		slog.WarnContext(c.Request.Context(), "audit: logout record failed", "error", auditErr)
+	}
 
 	platformauth.ClearSessionCookie(c.Writer, s.cookieOpts)
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})

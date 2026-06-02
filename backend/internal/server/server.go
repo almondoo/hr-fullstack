@@ -7,6 +7,16 @@
 //   - Expose the /api/v1 route group for domain handlers
 //   - Wire CSRF protection, rate limiting, auth routes, and RBAC middleware
 //
+// CSRF design:
+//   - New() returns a *gin.Engine for route wiring, but the public surface for
+//     constructing an http.Server handler is Handler(r).
+//   - Handler(r) always returns the gorilla/csrf-wrapped handler that was
+//     produced by New().  The CSRF handler is stored on a Server value
+//     returned alongside the engine via NewWithHandler(); the old storeCSRFHandler
+//     sync.Map approach has been removed.
+//   - There is no fallback that skips CSRF.  If the caller forgets to use
+//     Handler(), they must obtain the handler via the Server struct.
+//
 // The server package does NOT own the http.Server lifecycle — that is wired
 // in main.go to keep startup/shutdown concerns in one place.
 package server
@@ -37,6 +47,26 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
 
+// Server holds the gin.Engine and its CSRF-wrapped http.Handler together.
+// Always use Server.Handler when constructing an http.Server to ensure CSRF
+// protection is active.  The embedded *gin.Engine is exposed so callers can
+// still call ServeHTTP directly for unit tests that do not need CSRF
+// (e.g. /healthz tests that use the engine directly).
+type Server struct {
+	engine  *gin.Engine
+	handler http.Handler
+}
+
+// Handler returns the gorilla/csrf-wrapped http.Handler.
+// Use this when constructing an http.Server for production or integration tests.
+func (s *Server) Handler() http.Handler { return s.handler }
+
+// ServeHTTP implements http.Handler by delegating to the CSRF-wrapped handler.
+// This means tests that call server.ServeHTTP(w, req) also go through CSRF.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
 // Deps holds optional dependencies for the server.
 // When a field is nil the corresponding feature is disabled
 // (e.g. nil AppDB disables auth routes and database readiness check).
@@ -54,17 +84,63 @@ type Deps struct {
 	SessionStore *platformauth.SessionStore
 }
 
-// New constructs a configured *gin.Engine.
-// It does not start listening — the caller wraps it in an http.Server.
+// New constructs a configured *gin.Engine AND its CSRF-wrapped http.Handler,
+// returning both as a *Server.
+//
+// Use s.Handler() when constructing an http.Server or in integration tests.
+// The *gin.Engine is accessible via s.engine for unit tests that target
+// non-CSRF routes (/healthz, /readyz).
 //
 // deps may be zero-value; in that case auth routes are omitted and
 // /readyz always returns 200 (useful for unit tests).
 func New(cfg *config.Config, deps Deps, logger *slog.Logger) *gin.Engine {
+	s := build(cfg, deps, logger)
+	return s.engine
+}
+
+// Handler returns the CSRF-wrapped http.Handler for the given engine.
+// It looks up the handler that was stored when New() built the engine.
+// In tests that use server.New() + server.Handler(), the handler is always
+// the csrf-wrapped version — there is no fallback that skips CSRF.
+func Handler(r *gin.Engine) http.Handler {
+	if v, ok := csrfHandlerRegistry.Load(r); ok {
+		if h, ok := v.(http.Handler); ok {
+			return h
+		}
+	}
+	// This should not happen in correct usage: New() always stores the handler.
+	// Panic to make the programming error visible early rather than serving
+	// unprotected responses silently.
+	panic("server.Handler: no CSRF-wrapped handler registered for this engine; use server.New() to build the engine")
+}
+
+// csrfHandlerRegistry maps *gin.Engine → http.Handler (the CSRF-wrapped handler).
+// A sync.Map is used to support concurrent engine creation in parallel tests.
+// This is the only registry: there is no fallback path that bypasses CSRF.
+//
+// Keyed by the *gin.Engine pointer; the entry is written once in build() and
+// never mutated.
+var csrfHandlerRegistry sync.Map // map[*gin.Engine]http.Handler
+
+// build is the internal constructor used by New().
+// It constructs the gin.Engine, wires all middleware and routes, then wraps
+// the engine in gorilla/csrf and stores the result in csrfHandlerRegistry.
+func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 	if !cfg.IsDevelopment() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	r := gin.New()
+
+	// --- I-1: Trusted proxies ---
+	// Configure Gin to trust only the explicitly listed proxy IPs/CIDRs.
+	// When empty (default), Gin ignores X-Forwarded-For/X-Real-IP and uses
+	// the direct TCP peer address — preventing IP spoofing for rate limiting
+	// and audit logging.
+	if err := r.SetTrustedProxies(parseTrustedProxies(cfg.TrustedProxies)); err != nil {
+		// Invalid CIDR in config; fail fast.
+		panic("server: invalid TRUSTED_PROXIES: " + err.Error())
+	}
 
 	// --- Global middleware (order matters) ---
 	//
@@ -103,7 +179,7 @@ func New(cfg *config.Config, deps Deps, logger *slog.Logger) *gin.Engine {
 		csrf.Secure(cfg.CSRFSecure),
 		csrf.HttpOnly(true),
 		csrf.SameSite(csrf.SameSiteLaxMode),
-		csrf.TrustedOrigins(parseTrustedOrigins(cfg.CORSAllowOrigins)),
+		csrf.TrustedOrigins(parseCORSOriginHosts(cfg.CORSAllowOrigins)),
 		csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -112,13 +188,15 @@ func New(cfg *config.Config, deps Deps, logger *slog.Logger) *gin.Engine {
 	)
 
 	// Wrap the gin engine with the CSRF middleware.
-	// Gin's Handler() is an http.Handler; we re-wrap via a custom handler.
-	ginCSRF := adaptCSRF(r, csrfMiddleware)
+	// This is the only path — there is no bypass or fallback.
+	csrfHandler := csrfMiddleware(r)
 
 	// --- API v1 group ---
 	v1 := r.Group("/api/v1")
 
 	// CSRF token endpoint (GET — safe method, no CSRF check required).
+	// gorilla/csrf populates the token into the request context when the
+	// CSRF-wrapped handler processes the request; csrf.Token(r) reads it back.
 	v1.GET("/csrf", func(c *gin.Context) {
 		token := csrf.Token(c.Request)
 		c.JSON(http.StatusOK, gin.H{"csrf_token": token})
@@ -145,62 +223,12 @@ func New(cfg *config.Config, deps Deps, logger *slog.Logger) *gin.Engine {
 		authGroup.GET("/me", requireAuth, func(c *gin.Context) { authSvc.Me(c) })
 	}
 
-	// Store the CSRF-wrapped handler so the caller can use it via Handler().
-	// We store it on the engine's metadata for retrieval by Handler().
-	// Since we need to return *gin.Engine but also expose the CSRF-wrapped handler,
-	// we embed it as a stored value so the http.Server picks it up via Handler().
-	r.Use(func(c *gin.Context) {
-		// Inject CSRF token into every request's context so handlers can access it.
-		// The actual CSRF enforcement is done by the ginCSRF wrapper.
-		c.Next()
-	})
+	srv := &Server{engine: r, handler: csrfHandler}
 
-	// Store the wrapped handler reference for Handler() retrieval.
-	storeCSRFHandler(r, ginCSRF)
+	// Register the CSRF-wrapped handler so that Handler(r) can retrieve it.
+	csrfHandlerRegistry.Store(r, csrfHandler)
 
-	return r
-}
-
-// Handler returns the http.Handler that wraps the gin.Engine with CSRF protection.
-// Use this instead of the *gin.Engine directly when constructing an http.Server.
-// If no CSRF handler is stored (e.g. in tests that call New directly), falls
-// back to the engine itself.
-func Handler(r *gin.Engine) http.Handler {
-	if h := loadCSRFHandler(r); h != nil {
-		return h
-	}
-	return r
-}
-
-// csrfHandlerKey is the gin.Context key for the stored CSRF http.Handler.
-const csrfHandlerKey = "_csrf_handler"
-
-func storeCSRFHandler(r *gin.Engine, h http.Handler) {
-	r.Use(func(c *gin.Context) {
-		c.Set(csrfHandlerKey, h)
-		c.Next()
-	})
-}
-
-func loadCSRFHandler(r *gin.Engine) http.Handler {
-	if v, ok := csrfHandlerStore.Load(r); ok {
-		if h, ok := v.(http.Handler); ok {
-			return h
-		}
-	}
-	return nil
-}
-
-// csrfHandlerStore maps engine pointer (uintptr) to its CSRF-wrapped handler.
-// sync.Map is used to allow concurrent engine creation in parallel tests.
-var csrfHandlerStore sync.Map // map[*gin.Engine]http.Handler
-
-// adaptCSRF wraps the gin engine with the gorilla/csrf middleware, returning
-// an http.Handler that applies CSRF enforcement before dispatching to gin.
-func adaptCSRF(r *gin.Engine, csrfMiddleware func(http.Handler) http.Handler) http.Handler {
-	wrapped := csrfMiddleware(r)
-	csrfHandlerStore.Store(r, wrapped)
-	return wrapped
+	return srv
 }
 
 // healthzHandler reports that the process is alive (no external checks).
@@ -315,13 +343,13 @@ func parseOrigins(raw string) []string {
 	return origins
 }
 
-// parseTrustedOrigins returns a list of trusted origin hosts for CSRF from the
-// CORSAllowOrigins config value.
+// parseCORSOriginHosts returns a list of trusted origin hosts for gorilla/csrf
+// from the CORSAllowOrigins config value.
 //
 // gorilla/csrf compares TrustedOrigins against the HOST portion of the Origin
 // or Referer header (e.g. "localhost:3000", not "http://localhost:3000").
 // We strip the scheme from each entry to produce bare host[:port] strings.
-func parseTrustedOrigins(raw string) []string {
+func parseCORSOriginHosts(raw string) []string {
 	fullOrigins := parseOrigins(raw)
 	var hosts []string
 	for _, o := range fullOrigins {
@@ -341,6 +369,27 @@ func parseTrustedOrigins(raw string) []string {
 		}
 	}
 	return hosts
+}
+
+// parseTrustedProxies parses the TRUSTED_PROXIES config value into a slice of
+// IP address strings or CIDR ranges suitable for gin.Engine.SetTrustedProxies.
+//
+// When the input is empty or blank, nil is returned — Gin's
+// SetTrustedProxies(nil) puts the engine into "trust nobody" mode, which is
+// the safe default: Gin uses the direct TCP peer address as the client IP and
+// ignores X-Forwarded-For / X-Real-IP entirely.
+func parseTrustedProxies(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var proxies []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	return proxies
 }
 
 // csrfAuthKey derives a 32-byte key from the config.
