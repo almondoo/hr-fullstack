@@ -107,6 +107,23 @@ type Config struct {
 	// Should match SessionCookieSecure.
 	CSRFSecure bool `env:"CSRF_SECURE" envDefault:"false"`
 
+	// --- Field-level encryption ---
+	// FieldEncryptionKey is a base64-encoded 32-byte AES-256 key used to encrypt
+	// sensitive PII columns (口座番号, マイナンバー etc.) at the application layer.
+	//
+	// Production: inject from a secrets manager (AWS Secrets Manager, GCP Secret
+	// Manager, HashiCorp Vault, …).  The actual key value MUST NOT be committed
+	// to the repository.
+	//
+	// Development: when unset the crypto package generates an ephemeral random
+	// key at startup with a warning.  Encrypted values are unreadable after
+	// restart; this is acceptable for local development only.
+	//
+	// TODO: replace with KMS-backed data-key generation for production hardening.
+	// The crypto.FieldCipher interface is stable; swap the LoadKey implementation
+	// in internal/platform/crypto/crypto.go to use GenerateDataKey / Decrypt.
+	FieldEncryptionKey string `env:"FIELD_ENCRYPTION_KEY"`
+
 	// --- Rate limiting ---
 	// AuthRateLimit is the rate limit for login and signup endpoints.
 	// Format accepted by ulule/limiter: "10-M" (10 per minute), "100-H" (100 per hour).

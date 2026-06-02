@@ -79,8 +79,9 @@ type createEmployeeRequest struct {
 	Email          *string    `json:"email"           validate:"omitempty,email"`
 	DepartmentID   *uuid.UUID `json:"department_id"`
 	EmploymentType string     `json:"employment_type" validate:"required,oneof=full_time part_time contract temporary"`
-	Status         string     `json:"status"          validate:"required,oneof=active inactive terminated"`
-	HiredOn        *string    `json:"hired_on"        validate:"omitempty"`
+	// Status must include leaving/left to align with migration 00008 DB CHECK constraint.
+	Status  string  `json:"status"   validate:"required,oneof=active inactive terminated leaving left"`
+	HiredOn *string `json:"hired_on" validate:"omitempty"`
 }
 
 type updateEmployeeRequest struct {
@@ -90,8 +91,9 @@ type updateEmployeeRequest struct {
 	Email          *string    `json:"email"           validate:"omitempty,email"`
 	DepartmentID   *uuid.UUID `json:"department_id"`
 	EmploymentType string     `json:"employment_type" validate:"required,oneof=full_time part_time contract temporary"`
-	Status         string     `json:"status"          validate:"required,oneof=active inactive terminated"`
-	HiredOn        *string    `json:"hired_on"        validate:"omitempty"`
+	// Status must include leaving/left to align with migration 00008 DB CHECK constraint.
+	Status  string  `json:"status"   validate:"required,oneof=active inactive terminated leaving left"`
+	HiredOn *string `json:"hired_on" validate:"omitempty"`
 }
 
 // parseDate parses an optional YYYY-MM-DD string pointer.

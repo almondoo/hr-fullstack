@@ -45,6 +45,7 @@ import (
 	"github.com/your-org/hr-saas/internal/department"
 	"github.com/your-org/hr-saas/internal/employee"
 	"github.com/your-org/hr-saas/internal/leave"
+	"github.com/your-org/hr-saas/internal/onboarding"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
@@ -242,6 +243,9 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 
 		// --- Leave routes (休暇 / 年休 LM-040/041/042/043) ---
 		leave.RegisterRoutes(v1, deps.TenantDB, approvalSvc, requireAuth)
+
+		// --- Onboarding / offboarding routes (入退社 ST-LM-07) ---
+		onboarding.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}
