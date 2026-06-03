@@ -198,6 +198,23 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 	// Safe methods (GET, HEAD, OPTIONS) are exempt from CSRF checks.
 	// State-changing methods (POST/PUT/PATCH/DELETE) require the X-CSRF-Token header.
 	csrfKey := csrfAuthKey(cfg)
+	// Security note — GO-2025-3884 (gorilla/csrf v1.7.3, no upstream fix as of 2026-06-03):
+	// The vulnerability is a suffix-matching flaw in TrustedOrigins: if a caller passes
+	// wildcard-style or subdomain-suffix patterns, a malicious origin such as
+	// "evil.example.com" can match a trusted entry of "example.com".
+	//
+	// This codebase is NOT affected by that flaw because:
+	//   1. parseCORSOriginHosts() strips schemes and paths, then forwards the resulting
+	//      bare host[:port] strings verbatim from CORSAllowOrigins config — no patterns,
+	//      no wildcards, no subdomain notation.
+	//   2. The CORS origin allowlist is operator-configured (env var) and must list each
+	//      trusted origin explicitly; wildcard entries are not accepted.
+	//   3. csrf.SameSite(SameSiteLaxMode) provides an independent browser-enforced layer
+	//      that rejects cross-site state-changing requests without a same-site cookie.
+	//
+	// No code change is needed; the existing exact-host TrustedOrigins call is safe.
+	// When gorilla/csrf releases a version that fixes GO-2025-3884, upgrade via:
+	//   go get github.com/gorilla/csrf@<fixed-version> && go mod tidy
 	csrfMiddleware := csrf.Protect(
 		csrfKey,
 		csrf.Secure(cfg.CSRFSecure),
