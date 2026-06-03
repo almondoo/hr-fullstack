@@ -14,7 +14,11 @@ services:
       # hr_app ロール作成スクリプト(10-create-app-role.sh)が使用するパスワード
       HR_APP_DB_PASSWORD: ${HR_APP_DB_PASSWORD:?HR_APP_DB_PASSWORD must be set in .env}
     ports:
-      - "5432:5432"
+      # ホスト側ポートは他のローカルPostgreSQL(別プロジェクト等)との競合回避のためずらす。
+      # コンテナ内は5432のまま。host側は DB_HOST_PORT で上書き可(既定 15432)。
+      # 注意: api はコンテナ間通信(DB_HOST=db / DB_PORT=5432)なので本マッピング変更の影響を受けない。
+      #       ホストから psql 等で接続する場合のみ localhost:15432 を使うこと。
+      - "${DB_HOST_PORT:-15432}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       # initdb スクリプト: hr_app ロールをコンテナ初回起動時に作成する
