@@ -1064,7 +1064,7 @@ func TestFiveDayObligation_MultipleGrantsInYear(t *testing.T) {
 	ctx := context.Background()
 	tenantID := seedTenant(t, h.AdminDB)
 	actorID := seedUser(t, h.AdminDB, tenantID, "admin@example.com")
-	seedDefaultSettings(t, svc, ctx, tenantID, actorID) // threshold = 10
+	seedDefaultSettings(t, svc, ctx, tenantID, actorID) //nolint:gocritic // threshold = 10
 	empID := seedEmployee(t, h.AdminDB, tenantID, "EMPMULTIGRANT", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	anchor := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)

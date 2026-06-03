@@ -36,7 +36,7 @@ func NewHandler(svc *Service) *Handler {
 // ---------------------------------------------------------------------------
 
 // EmployeeResponse is the JSON representation of an employee.
-type EmployeeResponse struct {
+type EmployeeResponse struct { //nolint:revive // repetitive name is intentional for clarity at package boundary
 	ID             uuid.UUID  `json:"id"`
 	TenantID       uuid.UUID  `json:"tenant_id"`
 	EmployeeCode   string     `json:"employee_code"`

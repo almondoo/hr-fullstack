@@ -6,7 +6,7 @@ package attendance
 // parameters derived from AttendanceSetting / LaborAgreement rows. No value
 // is hard-coded in this file. Any statutory default lives only in the
 // migration (00005_attendance.sql) and must be reviewed by a qualified
-// labor-law professional after each statutory amendment.
+// labour-law professional after each statutory amendment.
 
 import (
 	"fmt"
@@ -89,22 +89,6 @@ func overlapWithDailyZone(workStart, workEnd, zoneStart, zoneEnd int) int {
 	return total
 }
 
-// max returns the larger of two ints.
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // parseTimeOfDay parses a "HH:MM:SS" or "HH:MM" string into minutes-since-midnight.
 // Returns an error if the string is malformed or out of range.
 func parseTimeOfDay(s string) (int, error) {
@@ -135,7 +119,7 @@ func parseTimeOfDay(s string) (int, error) {
 // Returns OvertimeBreakdown with all minute counts rounded according to setting.RoundingUnitMinutes.
 //
 // LEGAL NOTICE: This function reflects general statutory patterns as of 2026.
-// It MUST be reviewed with a qualified labor-law professional for your
+// It MUST be reviewed with a qualified labour-law professional for your
 // specific employment type and after each statutory amendment.
 func ComputeBreakdown(
 	clockIn, clockOut time.Time,
@@ -252,7 +236,7 @@ func ComputeBreakdown(
 //   - specialMonthCount: number of months this year in which special_clause was invoked.
 //   - avgMinutes: slice of monthly overtime minutes for recent N months (for
 //     multi-month average check; pass [] to skip).
-//   - ag: the applicable labor agreement.
+//   - ag: the applicable labour agreement.
 //   - approachingPct: fraction of the limit at which an "approaching" alert is
 //     raised (e.g. 0.90 for 90%). Pass 0 to disable approaching alerts.
 //

@@ -124,7 +124,7 @@ func TestEmployeeRBACPermission(t *testing.T) {
 	noPermUser := seedTenantWithRole(t, h.AdminDB, noPermTenantID, []string{"department:read"})
 	// Reuse same tenant for simpler test: seed a role with no employee perms in same tenant.
 	noEmpPermRoleID := uuid.New()
-	noEmpPermJSON, _ := json.Marshal(map[string][]string{"perms": []string{"department:read"}})
+	noEmpPermJSON, _ := json.Marshal(map[string][]string{"perms": {"department:read"}})
 	require.NoError(t, h.AdminDB.Exec(
 		`INSERT INTO roles (id, tenant_id, name, permissions) VALUES (?, ?, 'noperm_role', ?)`,
 		noEmpPermRoleID, tenantID, noEmpPermJSON,
@@ -266,5 +266,4 @@ func TestEmployeeRBACPermission(t *testing.T) {
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
-
 }

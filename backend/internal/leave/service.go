@@ -142,7 +142,8 @@ func (s *Service) UpsertSettings(ctx context.Context, in UpsertSettingsInput) (*
 			// supplied; otherwise let the column DEFAULT (migration values) apply.
 			newID := uuid.New()
 			var insertErr error
-			if grantJSONSupplied && propJSONSupplied {
+			switch {
+			case grantJSONSupplied && propJSONSupplied:
 				insertErr = tx.Exec(
 					`INSERT INTO leave_settings
 					   (id, tenant_id, base_date_rule, grant_table_json,
@@ -153,7 +154,7 @@ func (s *Service) UpsertSettings(ctx context.Context, in UpsertSettingsInput) (*
 					in.GrantTableJSON, in.ProportionalTableJSON,
 					in.FiveDayObligationThreshold, in.ExpiryMonths,
 				).Error
-			} else if grantJSONSupplied {
+			case grantJSONSupplied:
 				insertErr = tx.Exec(
 					`INSERT INTO leave_settings
 					   (id, tenant_id, base_date_rule, grant_table_json,
@@ -163,7 +164,7 @@ func (s *Service) UpsertSettings(ctx context.Context, in UpsertSettingsInput) (*
 					in.GrantTableJSON,
 					in.FiveDayObligationThreshold, in.ExpiryMonths,
 				).Error
-			} else {
+			default:
 				// Use column DEFAULTs for both JSON tables.
 				insertErr = tx.Exec(
 					`INSERT INTO leave_settings
@@ -350,7 +351,7 @@ type ComputeAnnualGrantInput struct {
 //
 // LEGAL NOTICE: The grant table values come from leave_settings.grant_table_json
 // and proportional_table_json.  Correctness depends on the tenant having
-// configured tables that reflect current Labor Standards Law.  Nothing here
+// configured tables that reflect current Labour Standards Law.  Nothing here
 // constitutes legal advice.
 func (s *Service) ComputeAndGrantAnnual(ctx context.Context, in ComputeAndGrantAnnualInput) (*Grant, error) {
 	// Load settings to decode the grant tables.
@@ -509,7 +510,7 @@ func (s *Service) GetBalance(ctx context.Context, tenantID, employeeID uuid.UUID
 //
 // LEGAL NOTICE: The obligation threshold (default 10 days) and required minimum
 // (5 days) come from leave_settings.  Both values MUST be verified against
-// current Labor Standards Law (労基法第39条第7項 等) by a qualified professional.
+// current Labour Standards Law (労基法第39条第7項 等) by a qualified professional.
 // The obligation year runs from the base date used for the most recent grant.
 func (s *Service) GetFiveDayObligation(ctx context.Context, tenantID, employeeID uuid.UUID, asOf time.Time) (*FiveDayObligation, error) {
 	setting, err := s.GetSettings(ctx, tenantID)

@@ -45,19 +45,6 @@ func validationMessage(err error) string {
 	return "validation failed"
 }
 
-// parseDate parses an optional YYYY-MM-DD string.
-// Returns (nil, nil) for nil/empty input; (nil, err) for invalid strings.
-func parseDate(s *string) (*time.Time, error) {
-	if s == nil || *s == "" {
-		return nil, nil
-	}
-	t, err := time.Parse("2006-01-02", *s)
-	if err != nil {
-		return nil, fmt.Errorf("invalid date %q: must be YYYY-MM-DD", *s)
-	}
-	return &t, nil
-}
-
 // parseDateRequired parses a required YYYY-MM-DD string.
 func parseDateRequired(s string) (time.Time, error) {
 	t, err := time.Parse("2006-01-02", s)

@@ -25,13 +25,16 @@ import (
 var (
 	ErrNotFound           = errors.New("attendance: not found")
 	ErrDuplicateRecord    = errors.New("attendance: record already exists for this date")
-	ErrDuplicateAgreement = errors.New("attendance: labor agreement already exists for this workplace and valid_from")
+	ErrDuplicateAgreement = errors.New("attendance: labor agreement already exists for this workplace and valid_from") //nolint:misspell // API contract: US spelling matches DB table and existing client expectations
 	ErrSettingsNotFound   = errors.New("attendance: settings not configured for this tenant")
-	ErrAgreementNotFound  = errors.New("attendance: no active labor agreement found")
+	ErrAgreementNotFound  = errors.New("attendance: no active labor agreement found") //nolint:misspell // API contract: US spelling matches DB table and existing client expectations
 )
 
 // maxCorrectionJSONBytes caps the size of before/after correction JSON payloads.
 const maxCorrectionJSONBytes = 32 * 1024 // 32 KB
+
+// laborAgreementsTable is the DB table for 36-agreement rows (migration 00005).
+const laborAgreementsTable = "labor_agreements" //nolint:misspell // DB contract: table named in migration 00005_attendance.sql
 
 // Service provides business logic for the attendance domain.
 type Service struct {
@@ -548,7 +551,7 @@ func (s *Service) GetWorkSummary(ctx context.Context, tenantID, employeeID uuid.
 // LaborAgreement (36協定 LM-032)
 // ---------------------------------------------------------------------------
 
-// CreateAgreementInput holds validated fields for a new labor agreement.
+// CreateAgreementInput holds validated fields for a new labour agreement.
 type CreateAgreementInput struct {
 	TenantID                   uuid.UUID
 	ActorID                    uuid.UUID
@@ -564,7 +567,7 @@ type CreateAgreementInput struct {
 	IP                         *string
 }
 
-// CreateAgreement inserts a new labor agreement.
+// CreateAgreement inserts a new labour agreement.
 func (s *Service) CreateAgreement(ctx context.Context, in CreateAgreementInput) (*LaborAgreement, error) {
 	ag := LaborAgreement{
 		ID:                         uuid.New(),
@@ -582,7 +585,7 @@ func (s *Service) CreateAgreement(ctx context.Context, in CreateAgreementInput) 
 
 	if err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
 		if err := tx.Exec(
-			`INSERT INTO labor_agreements
+			"INSERT INTO "+laborAgreementsTable+`
 			   (id, tenant_id, workplace, valid_from, valid_to,
 			    monthly_limit_minutes, yearly_limit_minutes,
 			    special_clause, special_monthly_limit_minutes, special_count_limit,
@@ -602,8 +605,8 @@ func (s *Service) CreateAgreement(ctx context.Context, in CreateAgreementInput) 
 		return audit.Record(tx, audit.Entry{
 			TenantID:     in.TenantID,
 			UserID:       &in.ActorID,
-			Action:       "labor_agreement.created",
-			ResourceType: "labor_agreement",
+			Action:       "labor_agreement.created", //nolint:misspell // audit contract: US spelling matches existing audit log records
+			ResourceType: "labor_agreement",         //nolint:misspell // audit contract: US spelling matches existing audit log records
 			ResourceID:   &idStr,
 			IP:           in.IP,
 		})
@@ -613,39 +616,39 @@ func (s *Service) CreateAgreement(ctx context.Context, in CreateAgreementInput) 
 	return &ag, nil
 }
 
-// ListAgreements returns all labor agreements for a tenant, ordered by valid_from DESC.
+// ListAgreements returns all labour agreements for a tenant, ordered by valid_from DESC.
 func (s *Service) ListAgreements(ctx context.Context, tenantID uuid.UUID) ([]LaborAgreement, error) {
 	var ags []LaborAgreement
 	err := s.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
 		return tx.Raw(
-			`SELECT id, tenant_id, workplace, valid_from, valid_to,
-			        monthly_limit_minutes, yearly_limit_minutes,
-			        special_clause, special_monthly_limit_minutes, special_count_limit,
-			        multi_month_avg_limit_minutes, created_at, updated_at
-			 FROM labor_agreements
-			 WHERE tenant_id = ?
-			 ORDER BY valid_from DESC`,
+			"SELECT id, tenant_id, workplace, valid_from, valid_to,"+
+				" monthly_limit_minutes, yearly_limit_minutes,"+
+				" special_clause, special_monthly_limit_minutes, special_count_limit,"+
+				" multi_month_avg_limit_minutes, created_at, updated_at"+
+				" FROM "+laborAgreementsTable+
+				" WHERE tenant_id = ?"+
+				" ORDER BY valid_from DESC",
 			tenantID,
 		).Scan(&ags).Error
 	})
 	return ags, err
 }
 
-// ActiveAgreement returns the labor agreement whose valid_from..valid_to range
+// ActiveAgreement returns the labour agreement whose valid_from..valid_to range
 // covers asOf, or ErrAgreementNotFound if none matches.
 func (s *Service) ActiveAgreement(ctx context.Context, tenantID uuid.UUID, asOf time.Time) (*LaborAgreement, error) {
 	var ag LaborAgreement
 	err := s.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
 		return tx.Raw(
-			`SELECT id, tenant_id, workplace, valid_from, valid_to,
-			        monthly_limit_minutes, yearly_limit_minutes,
-			        special_clause, special_monthly_limit_minutes, special_count_limit,
-			        multi_month_avg_limit_minutes, created_at, updated_at
-			 FROM labor_agreements
-			 WHERE tenant_id = ?
-			   AND valid_from <= ? AND valid_to >= ?
-			 ORDER BY valid_from DESC
-			 LIMIT 1`,
+			"SELECT id, tenant_id, workplace, valid_from, valid_to,"+
+				" monthly_limit_minutes, yearly_limit_minutes,"+
+				" special_clause, special_monthly_limit_minutes, special_count_limit,"+
+				" multi_month_avg_limit_minutes, created_at, updated_at"+
+				" FROM "+laborAgreementsTable+
+				" WHERE tenant_id = ?"+
+				" AND valid_from <= ? AND valid_to >= ?"+
+				" ORDER BY valid_from DESC"+
+				" LIMIT 1",
 			tenantID, asOf, asOf,
 		).Scan(&ag).Error
 	})
@@ -659,7 +662,7 @@ func (s *Service) ActiveAgreement(ctx context.Context, tenantID uuid.UUID, asOf 
 }
 
 // EvaluateAgreementAlerts loads the relevant work summaries and runs
-// CheckAgreementAlerts against the active labor agreement for the given month.
+// CheckAgreementAlerts against the active labour agreement for the given month.
 //
 // monthlySpecialCount is the number of months this fiscal year in which the
 // caller has triggered the special clause (the caller must track this in the
@@ -806,7 +809,7 @@ func isUniqueViolation(err error) bool {
 }
 
 func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
+	return len(s) >= len(sub) && (s == sub || sub == "" ||
 		func() bool {
 			for i := 0; i <= len(s)-len(sub); i++ {
 				if s[i:i+len(sub)] == sub {

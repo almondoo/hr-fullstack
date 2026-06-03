@@ -16,7 +16,7 @@ package attendance_test
 //
 // LEGAL NOTICE: All threshold values used in these tests are examples used to
 // exercise the machinery. They are not legal advice. Verify statutory
-// rates/limits with a qualified labor-law professional.
+// rates/limits with a qualified labour-law professional.
 
 import (
 	"bytes"
@@ -157,7 +157,7 @@ func truncateAttendanceTables(h *testdb.Harness) {
 		"attendance_corrections",
 		"attendance_records",
 		"attendance_settings",
-		"labor_agreements",
+		"labor_agreements", //nolint:misspell // DB contract: table is named labor_agreements in migration 00005
 		"employees",
 		"users",
 		"roles",
@@ -497,7 +497,7 @@ func TestAgreementAlerts_MonthlyExceeded(t *testing.T) {
 
 	svc := attendance.NewService(tdb)
 
-	// Seed a labor agreement with monthly_limit = 2700 min (45h).
+	// Seed a labour agreement with monthly_limit = 2700 min (45h).
 	ag, err := svc.CreateAgreement(ctx, attendance.CreateAgreementInput{
 		TenantID:            tenantID,
 		ActorID:             actorID,

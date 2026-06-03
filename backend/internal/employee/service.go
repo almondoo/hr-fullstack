@@ -86,7 +86,7 @@ type CreateEmployeeInput struct {
 
 // CreateEmployee inserts a new employee and records an audit event.
 // [Security: MUSTFIX 1] When DepartmentID is provided, it verifies that the
-// department belongs to the same tenant before inserting — defense-in-depth
+// department belongs to the same tenant before inserting — defence-in-depth
 // on top of the composite FK constraint.
 func (s *Service) CreateEmployee(ctx context.Context, in CreateEmployeeInput) (*Employee, error) {
 	emp := Employee{
@@ -303,7 +303,7 @@ type CreateAssignmentInput struct {
 
 // CreateAssignment inserts a new発令 record and records an audit event.
 // [Security: MUSTFIX 1] Verifies both employee and (optional) department
-// belong to the same tenant before inserting — defense-in-depth on top of
+// belong to the same tenant before inserting — defence-in-depth on top of
 // the composite FK constraints.
 func (s *Service) CreateAssignment(ctx context.Context, in CreateAssignmentInput) (*Assignment, error) {
 	asgn := Assignment{

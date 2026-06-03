@@ -2,10 +2,10 @@
 //
 // LEGAL NOTICE: All time-calculation thresholds, overtime rates, 36-agreement
 // limits, and night-work boundaries derive from per-tenant configuration stored
-// in attendance_settings / labor_agreements tables. Hard-coded values are NOT
+// in attendance_settings / labour_agreements tables. Hard-coded values are NOT
 // used for any compliance-sensitive calculation. Default values in migration
-// 00005 are based on Japanese Labor Standards Law as of 2026-06-02 and MUST be
-// reviewed by a qualified labor-law professional (社会保険労務士/弁護士) and
+// 00005 are based on Japanese Labour Standards Law as of 2026-06-02 and MUST be
+// reviewed by a qualified labour-law professional (社会保険労務士/弁護士) and
 // kept current with statutory amendments. Nothing in this package constitutes
 // legal advice.
 package attendance
@@ -19,7 +19,7 @@ import (
 // AttendanceRecord is the GORM model for the attendance_records table.
 // It captures the objective time record for one employee on one work date
 // (客観的把握 LM-030).
-type AttendanceRecord struct {
+type AttendanceRecord struct { //nolint:revive // established public API: renaming would break callers
 	ID           uuid.UUID  `gorm:"column:id;primaryKey"`
 	TenantID     uuid.UUID  `gorm:"column:tenant_id"`
 	EmployeeID   uuid.UUID  `gorm:"column:employee_id"`
@@ -40,7 +40,7 @@ func (AttendanceRecord) TableName() string { return "attendance_records" }
 // AttendanceCorrection is the GORM model for the attendance_corrections table.
 // Every modification to an attendance record is recorded here to provide the
 // objective-record audit trail required by LM-030.
-type AttendanceCorrection struct {
+type AttendanceCorrection struct { //nolint:revive // established public API: renaming would break callers
 	ID                 uuid.UUID `gorm:"column:id;primaryKey"`
 	TenantID           uuid.UUID `gorm:"column:tenant_id"`
 	AttendanceRecordID uuid.UUID `gorm:"column:attendance_record_id"`
@@ -74,7 +74,7 @@ type WorkSummary struct {
 // TableName maps WorkSummary to the work_summaries table.
 func (WorkSummary) TableName() string { return "work_summaries" }
 
-// LaborAgreement is the GORM model for the labor_agreements table.
+// LaborAgreement is the GORM model for the labour_agreements table (mapped via TableName).
 // It holds the per-tenant 36-agreement (三六協定) configuration (LM-032).
 //
 // All limit columns derive from statutory requirements that may change with
@@ -95,16 +95,16 @@ type LaborAgreement struct {
 	UpdatedAt                  time.Time `gorm:"column:updated_at"`
 }
 
-// TableName maps LaborAgreement to the labor_agreements table.
-func (LaborAgreement) TableName() string { return "labor_agreements" }
+// TableName returns the DB table name for 36-agreement rows (migration 00005_attendance.sql).
+func (LaborAgreement) TableName() string { return "labor_agreements" } //nolint:misspell // DB contract: table name set in migration 00005_attendance.sql
 
 // AttendanceSetting is the GORM model for the attendance_settings table.
 // One row per tenant; stores all configurable compliance thresholds.
 //
 // LEGAL NOTICE: Default values in this struct reflect statutory defaults as of
 // 2026-06-02. They MUST be reviewed with each amendment by a qualified
-// labor-law professional.
-type AttendanceSetting struct {
+// labour-law professional.
+type AttendanceSetting struct { //nolint:revive // established public API: renaming would break callers
 	ID                    uuid.UUID `gorm:"column:id;primaryKey"`
 	TenantID              uuid.UUID `gorm:"column:tenant_id"`
 	RoundingUnitMinutes   int       `gorm:"column:rounding_unit_minutes"`

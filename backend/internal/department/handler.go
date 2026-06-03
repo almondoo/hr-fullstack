@@ -29,7 +29,7 @@ func NewHandler(svc *Service) *Handler {
 // ---------------------------------------------------------------------------
 
 // DepartmentResponse is the JSON representation of a department.
-type DepartmentResponse struct {
+type DepartmentResponse struct { //nolint:revive // name is intentional for cross-package clarity
 	ID        uuid.UUID  `json:"id"`
 	TenantID  uuid.UUID  `json:"tenant_id"`
 	ParentID  *uuid.UUID `json:"parent_id,omitempty"`

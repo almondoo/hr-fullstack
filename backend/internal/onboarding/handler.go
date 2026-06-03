@@ -639,8 +639,6 @@ type initiateOffboardingRequest struct {
 	Notes           *string `json:"notes"`
 }
 
-type completeOffboardingRequest struct{}
-
 // OffboardingPolicyResponse is the JSON representation of an offboarding policy.
 type OffboardingPolicyResponse struct {
 	ID             uuid.UUID  `json:"id"`

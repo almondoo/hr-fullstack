@@ -35,27 +35,25 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 
 	emps := rg.Group("/employees")
 	emps.Use(requireAuth)
-	{
-		emps.GET("", empRead, h.ListEmployees)
-		emps.POST("", empWrite, h.CreateEmployee)
-		emps.GET("/:id", empRead, h.GetEmployee)
-		emps.PUT("/:id", empWrite, h.UpdateEmployee)
-		emps.DELETE("/:id", empWrite, h.DeleteEmployee)
 
-		// Assignments (nested under employee).
-		emps.POST("/:id/assignments", empWrite, h.CreateAssignment)
-		emps.GET("/:id/assignments", empRead, h.ListAssignments)
+	emps.GET("", empRead, h.ListEmployees)
+	emps.POST("", empWrite, h.CreateEmployee)
+	emps.GET("/:id", empRead, h.GetEmployee)
+	emps.PUT("/:id", empWrite, h.UpdateEmployee)
+	emps.DELETE("/:id", empWrite, h.DeleteEmployee)
 
-		// Contracts (nested under employee).
-		emps.POST("/:id/contracts", ctrWrite, h.CreateContract)
-		emps.GET("/:id/contracts", ctrRead, h.ListContracts)
-	}
+	// Assignments (nested under employee).
+	emps.POST("/:id/assignments", empWrite, h.CreateAssignment)
+	emps.GET("/:id/assignments", empRead, h.ListAssignments)
+
+	// Contracts (nested under employee).
+	emps.POST("/:id/contracts", ctrWrite, h.CreateContract)
+	emps.GET("/:id/contracts", ctrRead, h.ListContracts)
 
 	// Contract lifecycle endpoints (top-level, by contract ID).
 	ctrs := rg.Group("/contracts")
 	ctrs.Use(requireAuth)
-	{
-		ctrs.GET("/:id", ctrRead, h.GetContract)
-		ctrs.PATCH("/:id/status", ctrWrite, h.UpdateContractStatus)
-	}
+
+	ctrs.GET("/:id", ctrRead, h.GetContract)
+	ctrs.PATCH("/:id/status", ctrWrite, h.UpdateContractStatus)
 }

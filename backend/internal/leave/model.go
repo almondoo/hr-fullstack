@@ -5,8 +5,8 @@
 // LEGAL NOTICE: All grant-table values, proportional-grant tables, five-day
 // obligation thresholds, and expiry durations are read from per-tenant
 // leave_settings and are NOT hard-coded.  Default values in migration 00007
-// are based on Japanese Labor Standards Law as of 2026-06-02 and MUST be
-// reviewed by a qualified labor-law professional (社会保険労務士 / 弁護士)
+// are based on Japanese Labour Standards Law as of 2026-06-02 and MUST be
+// reviewed by a qualified labour-law professional (社会保険労務士 / 弁護士)
 // and kept current with statutory amendments.  Nothing in this package
 // constitutes legal advice.
 package leave
@@ -21,6 +21,7 @@ import (
 // leave_type constants
 // ---------------------------------------------------------------------------
 
+// Leave type values stored in the leave_type column.
 const (
 	LeaveTypeAnnual     = "annual"     // 年次有給休暇
 	LeaveTypeSpecial    = "special"    // 特別休暇
@@ -35,6 +36,7 @@ const (
 // leave_request status constants
 // ---------------------------------------------------------------------------
 
+// Request status values stored in the status column.
 const (
 	RequestStatusPending   = "pending"
 	RequestStatusApproved  = "approved"
@@ -46,6 +48,7 @@ const (
 // leave_grant source constants
 // ---------------------------------------------------------------------------
 
+// Grant source values stored in the source column.
 const (
 	GrantSourceAnnual       = "annual_grant"
 	GrantSourceProportional = "proportional_grant"
@@ -131,7 +134,7 @@ func (Usage) TableName() string { return "leave_usages" }
 // GrantEntry is one row in grant_table_json.
 // TenureMonthsMax nil means "no upper bound" (≥ TenureMonthsMin).
 //
-// LEGAL NOTICE: values MUST be verified against current Labor Standards Law
+// LEGAL NOTICE: values MUST be verified against current Labour Standards Law
 // by a qualified professional before use.
 type GrantEntry struct {
 	TenureMonthsMin int     `json:"tenure_months_min"`

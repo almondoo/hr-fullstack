@@ -38,46 +38,36 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 	// --- Checklist template routes ---
 	templates := rg.Group("/onboarding/templates")
 	templates.Use(requireAuth)
-	{
-		templates.POST("", obWrite, h.CreateTemplate)
-		templates.GET("", obRead, h.ListTemplates)
-	}
+	templates.POST("", obWrite, h.CreateTemplate)
+	templates.GET("", obRead, h.ListTemplates)
 
 	// --- Task routes (nested under employee) ---
 	// Generate and list tasks.
 	empTasks := rg.Group("/employees/:id/onboarding/tasks")
 	empTasks.Use(requireAuth)
-	{
-		empTasks.POST("/generate", obWrite, h.GenerateTasks)
-		empTasks.GET("", obRead, h.ListTasks)
-	}
+	empTasks.POST("/generate", obWrite, h.GenerateTasks)
+	empTasks.GET("", obRead, h.ListTasks)
 
 	// Top-level task mutation routes (by task_id).
 	tasks := rg.Group("/onboarding/tasks")
 	tasks.Use(requireAuth)
-	{
-		tasks.PATCH("/:task_id/status", obWrite, h.UpdateTaskStatus)
-		tasks.PATCH("/:task_id/assign", obWrite, h.AssignTask)
-	}
+	tasks.PATCH("/:task_id/status", obWrite, h.UpdateTaskStatus)
+	tasks.PATCH("/:task_id/assign", obWrite, h.AssignTask)
 
 	// --- Intake form routes ---
 	intake := rg.Group("/employees/:id/intake")
 	intake.Use(requireAuth)
-	{
-		intake.POST("", intakeWrite, h.SubmitIntakeForm)
-		// Standard read (masked bank account):
-		intake.GET("", intakeRead, h.GetIntakeForm)
-		// Sensitive read (decrypted bank account — requires intake:read_sensitive):
-		intake.GET("/sensitive", intakeSensitive, h.GetIntakeFormSensitive)
-		intake.POST("/verify", intakeWrite, h.VerifyIntakeForm)
-	}
+	intake.POST("", intakeWrite, h.SubmitIntakeForm)
+	// Standard read (masked bank account):
+	intake.GET("", intakeRead, h.GetIntakeForm)
+	// Sensitive read (decrypted bank account — requires intake:read_sensitive):
+	intake.GET("/sensitive", intakeSensitive, h.GetIntakeFormSensitive)
+	intake.POST("/verify", intakeWrite, h.VerifyIntakeForm)
 
 	// --- Offboarding routes ---
 	offboard := rg.Group("/employees/:id/offboarding")
 	offboard.Use(requireAuth)
-	{
-		offboard.POST("", obWrite, h.InitiateOffboarding)
-		offboard.POST("/complete", obWrite, h.CompleteOffboarding)
-		offboard.GET("/policy", obRead, h.GetOffboardingPolicy)
-	}
+	offboard.POST("", obWrite, h.InitiateOffboarding)
+	offboard.POST("/complete", obWrite, h.CompleteOffboarding)
+	offboard.GET("/policy", obRead, h.GetOffboardingPolicy)
 }

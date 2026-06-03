@@ -9,7 +9,7 @@ package attendance
 // LEGAL NOTICE: Test values are representative examples used to verify
 // the calculation machinery. They do NOT constitute authoritative legal
 // thresholds. Always confirm applicable rates/limits with a qualified
-// labor-law professional.
+// labour-law professional.
 
 import (
 	"testing"
@@ -343,7 +343,7 @@ func makeAgreement(monthlyMin, yearlyMin int, special bool, specialMonthlyMin, s
 
 // LEGAL NOTE: The monthly/yearly limits below (2700/21600) mirror default
 // statutory values as of 2026-06-02. They are configured per-tenant in
-// labor_agreements and are NOT hard-coded thresholds. Verify with a qualified
+// labour_agreements and are NOT hard-coded thresholds. Verify with a qualified
 // professional after each amendment.
 func TestCheckAgreementAlerts_MonthlyBelowLimit(t *testing.T) {
 	ag := makeAgreement(2700, 21600, false, nil, nil, nil)
@@ -447,7 +447,7 @@ func TestCheckAgreementAlerts_MultiMonthAvg_Exceeded(t *testing.T) {
 
 // LEGAL NOTE: The 80h / 100h thresholds for multi-month average are statutory
 // health-care provisions subject to revision. The actual limits come from the
-// labor_agreements table; these tests use the default (4800 min = 80h).
+// labour_agreements table; these tests use the default (4800 min = 80h).
 func TestCheckAgreementAlerts_MultiMonthAvg_6Month(t *testing.T) {
 	// 6-month window: average 3000 (50h) < 4800 → no alert
 	avgLimit := 4800
@@ -533,7 +533,7 @@ func TestCheckDeviationAlert_PopulatesFields(t *testing.T) {
 
 // TestComputeBreakdown_Over60Boundary_Configurable verifies that changing
 // Over60BoundaryMinutes in AttendanceSetting changes the over60 split result.
-// LEGAL NOTE: 要専門家確認・改正追従 — 月60h境界は labor_standards 改正で変わりうる。
+// LEGAL NOTE: 要専門家確認・改正追従 — 月60h境界は labour_standards 改正で変わりうる。
 // 設定値を変えると判定が変わることを確認するテスト。
 func TestComputeBreakdown_Over60Boundary_Configurable(t *testing.T) {
 	loc := time.UTC
@@ -543,7 +543,7 @@ func TestComputeBreakdown_Over60Boundary_Configurable(t *testing.T) {
 	co := time.Date(2024, 1, 28, 16, 0, 0, 0, loc)
 
 	// Default boundary 3600: remaining = 3600-3000 = 600 > 480, so all OT is ≤60h.
-	st := defaultSetting() // Over60BoundaryMinutes = 3600
+	st := defaultSetting() // Over60BoundaryMinutes is 3600 by default
 	bd1, err := ComputeBreakdown(ci, co, 0, 0, false, 3000, st)
 	require.NoError(t, err)
 	assert.Equal(t, 480, bd1.OvertimeMinutes, "all OT under 3600 boundary")

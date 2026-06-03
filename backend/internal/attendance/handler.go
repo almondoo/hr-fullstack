@@ -514,7 +514,7 @@ func (h *Handler) CreateAgreement(c *gin.Context) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrDuplicateAgreement) {
-			httpx.RespondError(c, http.StatusConflict, "DUPLICATE", "a labor agreement already exists for this workplace and valid_from date")
+			httpx.RespondError(c, http.StatusConflict, "DUPLICATE", "a labor agreement already exists for this workplace and valid_from date") //nolint:misspell // API contract: US spelling matches DB table and existing client expectations
 			return
 		}
 		httpx.RespondInternalError(c)
@@ -552,7 +552,7 @@ func (h *Handler) EvaluateAlerts(c *gin.Context) {
 	alerts, err := h.svc.EvaluateAgreementAlerts(c.Request.Context(), tenantID, empID, pm, 0, 0.9)
 	if err != nil {
 		if errors.Is(err, ErrAgreementNotFound) {
-			httpx.RespondError(c, http.StatusNotFound, "NOT_FOUND", "no active labor agreement found for this period")
+			httpx.RespondError(c, http.StatusNotFound, "NOT_FOUND", "no active labor agreement found for this period") //nolint:misspell // API contract: US spelling matches DB table and existing client expectations
 			return
 		}
 		httpx.RespondInternalError(c)

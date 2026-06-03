@@ -34,24 +34,23 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, approvalSvc *ap
 
 	leave := rg.Group("/leave")
 	leave.Use(requireAuth)
-	{
-		// Settings
-		leave.GET("/settings", leaveRead, h.GetSettings)
-		leave.PUT("/settings", leaveAdmin, h.UpsertSettings)
 
-		// Grant management
-		leave.POST("/grants", leaveAdmin, h.CreateGrant)
-		leave.POST("/grants/compute-annual", leaveAdmin, h.ComputeAndGrantAnnual)
+	// Settings
+	leave.GET("/settings", leaveRead, h.GetSettings)
+	leave.PUT("/settings", leaveAdmin, h.UpsertSettings)
 
-		// Per-employee sub-resources
-		leave.GET("/employees/:employee_id/grants", leaveRead, h.ListGrants)
-		leave.GET("/employees/:employee_id/balance", leaveRead, h.GetBalance)
-		leave.GET("/employees/:employee_id/five-day-obligation", leaveRead, h.GetFiveDayObligation)
-		leave.GET("/employees/:employee_id/requests", leaveRead, h.ListRequests)
+	// Grant management
+	leave.POST("/grants", leaveAdmin, h.CreateGrant)
+	leave.POST("/grants/compute-annual", leaveAdmin, h.ComputeAndGrantAnnual)
 
-		// Requests
-		leave.POST("/requests", leaveWrite, h.CreateRequest)
-		leave.GET("/requests/:id", leaveRead, h.GetRequest)
-		leave.PATCH("/requests/:id/status", leaveAdmin, h.UpdateRequestStatus)
-	}
+	// Per-employee sub-resources
+	leave.GET("/employees/:employee_id/grants", leaveRead, h.ListGrants)
+	leave.GET("/employees/:employee_id/balance", leaveRead, h.GetBalance)
+	leave.GET("/employees/:employee_id/five-day-obligation", leaveRead, h.GetFiveDayObligation)
+	leave.GET("/employees/:employee_id/requests", leaveRead, h.ListRequests)
+
+	// Requests
+	leave.POST("/requests", leaveWrite, h.CreateRequest)
+	leave.GET("/requests/:id", leaveRead, h.GetRequest)
+	leave.PATCH("/requests/:id/status", leaveAdmin, h.UpdateRequestStatus)
 }

@@ -54,7 +54,7 @@ type RouteStep struct {
 }
 
 // ApprovalRoute is the GORM model for the approval_routes table.
-type ApprovalRoute struct {
+type ApprovalRoute struct { //nolint:revive // name is intentional for cross-package clarity
 	ID           uuid.UUID  `gorm:"column:id;primaryKey"`
 	TenantID     uuid.UUID  `gorm:"column:tenant_id"`
 	RequestType  string     `gorm:"column:request_type"`
@@ -70,7 +70,7 @@ type ApprovalRoute struct {
 func (ApprovalRoute) TableName() string { return "approval_routes" }
 
 // ApprovalRequest is the GORM model for the approval_requests table.
-type ApprovalRequest struct {
+type ApprovalRequest struct { //nolint:revive // name is intentional for cross-package clarity
 	ID                uuid.UUID `gorm:"column:id;primaryKey"`
 	TenantID          uuid.UUID `gorm:"column:tenant_id"`
 	RequestType       string    `gorm:"column:request_type"`
@@ -88,7 +88,7 @@ type ApprovalRequest struct {
 func (ApprovalRequest) TableName() string { return "approval_requests" }
 
 // ApprovalStep is the GORM model for the approval_steps table.
-type ApprovalStep struct {
+type ApprovalStep struct { //nolint:revive // name is intentional for cross-package clarity
 	ID              uuid.UUID  `gorm:"column:id;primaryKey"`
 	TenantID        uuid.UUID  `gorm:"column:tenant_id"`
 	RequestID       uuid.UUID  `gorm:"column:request_id"`

@@ -36,24 +36,23 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 
 	att := rg.Group("/attendance")
 	att.Use(requireAuth)
-	{
-		// Settings (テナント設定)
-		att.GET("/settings", attRead, h.GetSettings)
-		att.PUT("/settings", attWrite, h.UpsertSettings)
 
-		// Attendance records (打刻)
-		att.POST("/records", attWrite, h.CreateRecord)
-		att.GET("/records", attRead, h.ListRecords)
-		att.GET("/records/:id", attRead, h.GetRecord)
-		att.PATCH("/records/:id/correct", attWrite, h.CorrectRecord)
+	// Settings (テナント設定)
+	att.GET("/settings", attRead, h.GetSettings)
+	att.PUT("/settings", attWrite, h.UpsertSettings)
 
-		// Work summaries (月次集計)
-		att.POST("/summaries/compute", attWrite, h.ComputeSummary)
-		att.GET("/summaries", attRead, h.GetSummary)
+	// Attendance records (打刻)
+	att.POST("/records", attWrite, h.CreateRecord)
+	att.GET("/records", attRead, h.ListRecords)
+	att.GET("/records/:id", attRead, h.GetRecord)
+	att.PATCH("/records/:id/correct", attWrite, h.CorrectRecord)
 
-		// Labor agreements (36協定)
-		att.POST("/labor-agreements", laWrite, h.CreateAgreement)
-		att.GET("/labor-agreements", laRead, h.ListAgreements)
-		att.GET("/labor-agreements/alerts", laRead, h.EvaluateAlerts)
-	}
+	// Work summaries (月次集計)
+	att.POST("/summaries/compute", attWrite, h.ComputeSummary)
+	att.GET("/summaries", attRead, h.GetSummary)
+
+	// Labour agreements (36協定)
+	att.POST("/labor-agreements", laWrite, h.CreateAgreement)     //nolint:misspell // API contract: US spelling matches existing route and client expectations
+	att.GET("/labor-agreements", laRead, h.ListAgreements)        //nolint:misspell // API contract: US spelling matches existing route and client expectations
+	att.GET("/labor-agreements/alerts", laRead, h.EvaluateAlerts) //nolint:misspell // API contract: US spelling matches existing route and client expectations
 }

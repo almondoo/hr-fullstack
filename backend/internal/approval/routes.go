@@ -33,24 +33,20 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 	// Route administration (admin only).
 	routes := rg.Group("/approval/routes")
 	routes.Use(requireAuth)
-	{
-		routes.POST("", approvalAdmin, h.CreateRoute)
-		routes.GET("", approvalRead, h.ListRoutes)
-	}
+	routes.POST("", approvalAdmin, h.CreateRoute)
+	routes.GET("", approvalRead, h.ListRoutes)
 
 	// Request lifecycle.
 	reqs := rg.Group("/approval/requests")
 	reqs.Use(requireAuth)
-	{
-		// Named sub-paths before the :id wildcard to avoid routing ambiguity.
-		reqs.GET("/mine", approvalRead, h.ListMyRequests)
-		reqs.GET("/pending", approvalRead, h.ListPendingForMe)
+	// Named sub-paths before the :id wildcard to avoid routing ambiguity.
+	reqs.GET("/mine", approvalRead, h.ListMyRequests)
+	reqs.GET("/pending", approvalRead, h.ListPendingForMe)
 
-		reqs.POST("", approvalWrite, h.Submit)
-		reqs.GET("/:id", approvalRead, h.GetRequest)
-		reqs.GET("/:id/steps", approvalRead, h.ListSteps)
-		reqs.POST("/:id/decide", approvalWrite, h.Decide)
-		reqs.POST("/:id/cancel", approvalWrite, h.Cancel)
-		reqs.PUT("/:id/delegate", approvalWrite, h.SetDelegate)
-	}
+	reqs.POST("", approvalWrite, h.Submit)
+	reqs.GET("/:id", approvalRead, h.GetRequest)
+	reqs.GET("/:id/steps", approvalRead, h.ListSteps)
+	reqs.POST("/:id/decide", approvalWrite, h.Decide)
+	reqs.POST("/:id/cancel", approvalWrite, h.Cancel)
+	reqs.PUT("/:id/delegate", approvalWrite, h.SetDelegate)
 }

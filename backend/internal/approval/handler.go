@@ -206,11 +206,7 @@ func (h *Handler) CreateRoute(c *gin.Context) {
 
 	steps := make([]RouteStep, len(req.Steps))
 	for i, s := range req.Steps {
-		steps[i] = RouteStep{
-			Step:   s.Step,
-			Role:   s.Role,
-			UserID: s.UserID,
-		}
+		steps[i] = RouteStep(s)
 	}
 
 	route, err := h.svc.CreateRoute(c.Request.Context(), CreateRouteInput{

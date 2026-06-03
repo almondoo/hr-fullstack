@@ -26,11 +26,9 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 
 	g := rg.Group("/departments")
 	g.Use(requireAuth)
-	{
-		g.GET("", read, h.List)
-		g.POST("", write, h.Create)
-		g.GET("/:id", read, h.Get)
-		g.PUT("/:id", write, h.Update)
-		g.DELETE("/:id", write, h.Delete)
-	}
+	g.GET("", read, h.List)
+	g.POST("", write, h.Create)
+	g.GET("/:id", read, h.Get)
+	g.PUT("/:id", write, h.Update)
+	g.DELETE("/:id", write, h.Delete)
 }
