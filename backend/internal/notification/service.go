@@ -105,11 +105,12 @@ func hashEmail(email string) string {
 
 // Service provides business logic for the notification platform.
 type Service struct {
-	tdb    *tenantdb.TenantDB
-	mailer MailSender
+	tdb         *tenantdb.TenantDB
+	mailer      MailSender
+	chatSenders []ChatSender
 }
 
-// NewService constructs a Service with the default MockSender.
+// NewService constructs a Service with the default MockSender and no chat senders.
 func NewService(tdb *tenantdb.TenantDB) *Service {
 	return &Service{tdb: tdb, mailer: MockSender{}}
 }
@@ -121,6 +122,119 @@ func NewServiceWithMailer(tdb *tenantdb.TenantDB, mailer MailSender) *Service {
 		mailer = MockSender{}
 	}
 	return &Service{tdb: tdb, mailer: mailer}
+}
+
+// NewServiceWithChat constructs a Service with both a custom MailSender and a
+// set of ChatSender adapters (Slack / Teams / LINE WORKS).
+//
+// chatSenders may be nil or empty; in that case no chat dispatch is performed.
+// Pass MockChatSender instances for development / test environments.
+//
+// Example (production wiring):
+//
+//	slack, _ := notification.NewSlackSender(notification.SlackConfig{
+//	    WebhookURL: os.Getenv("NOTIFICATION_SLACK_WEBHOOK_URL"),
+//	})
+//	teams, _ := notification.NewTeamsSender(notification.TeamsConfig{
+//	    WebhookURL: os.Getenv("NOTIFICATION_TEAMS_WEBHOOK_URL"),
+//	})
+//	lw, _ := notification.NewLineWorksSender(notification.LineWorksConfig{
+//	    BotID:        os.Getenv("NOTIFICATION_LINE_WORKS_BOT_ID"),
+//	    ChannelID:    os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_ID"),
+//	    ChannelToken: os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN"),
+//	})
+//	svc := notification.NewServiceWithChat(tdb, nil, slack, teams, lw)
+func NewServiceWithChat(tdb *tenantdb.TenantDB, mailer MailSender, chatSenders ...ChatSender) *Service {
+	if mailer == nil {
+		mailer = MockSender{}
+	}
+	return &Service{tdb: tdb, mailer: mailer, chatSenders: chatSenders}
+}
+
+// ---------------------------------------------------------------------------
+// Chat dispatch
+// ---------------------------------------------------------------------------
+
+// SendChatInput holds parameters for dispatching a chat notification.
+//
+// SECURITY: Text and DeepLink must never contain sensitive PII.
+type SendChatInput struct {
+	// TenantID scopes the operation for audit purposes.
+	TenantID uuid.UUID
+	// ActorID is the user or system principal triggering the dispatch.
+	ActorID uuid.UUID
+	// EventType is used for audit and future per-event opt-in filtering.
+	EventType string
+	// Text is the non-sensitive message body rendered for chat.
+	// SECURITY: never include マイナンバー/口座/健診 or other sensitive PII.
+	Text string
+	// DeepLink is an opaque deep-link reference appended to the message.
+	// SECURITY: must not encode sensitive PII in path or query parameters.
+	DeepLink string
+	IP       *string
+}
+
+// SendChatResult summarises the outcome of a SendChat call.
+type SendChatResult struct {
+	// SentChannels contains the ChannelName of each ChatSender that succeeded.
+	SentChannels []string
+	// Errors contains per-channel errors (keyed by ChannelName).  A partial
+	// failure is reported here rather than returning an error, so that a single
+	// failing adapter does not suppress delivery on others.
+	Errors map[string]error
+}
+
+// SendChat dispatches a chat notification to all registered ChatSenders.
+//
+// Each sender is attempted independently; failures are collected in
+// SendChatResult.Errors and do not abort remaining senders.  An audit record
+// is written using tenantdb.WithinTenant regardless of chat send outcomes.
+//
+// When no ChatSenders are registered, SendChat is a no-op (returns an empty
+// SendChatResult with no error).
+func (s *Service) SendChat(ctx context.Context, in SendChatInput) (*SendChatResult, error) {
+	result := &SendChatResult{
+		Errors: make(map[string]error),
+	}
+
+	msg := ChatMessage{Text: in.Text, DeepLink: in.DeepLink}
+
+	for _, sender := range s.chatSenders {
+		name := sender.ChannelName()
+		_, sendErr := sender.Send(ctx, msg)
+		if sendErr != nil {
+			result.Errors[name] = sendErr
+			slog.Warn("notification: chat send failed",
+				"channel", name,
+				"event_type", in.EventType,
+				"error", sendErr.Error(),
+			)
+		} else {
+			result.SentChannels = append(result.SentChannels, name)
+		}
+	}
+
+	// Audit the dispatch attempt (per-tenant RLS).  The audit record carries
+	// only opaque identifiers — no message body, no PII.
+	auditErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		return audit.Record(tx, audit.Entry{
+			TenantID:     in.TenantID,
+			UserID:       &in.ActorID,
+			Action:       "notification.chat_sent",
+			ResourceType: "notification_event",
+			ResourceID:   nil,
+			IP:           in.IP,
+		})
+	})
+	if auditErr != nil {
+		// Audit failure is non-fatal for the chat dispatch but should be visible.
+		slog.Error("notification: chat audit failed",
+			"event_type", in.EventType,
+			"error", auditErr.Error(),
+		)
+	}
+
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -28,8 +28,11 @@ import (
 
 // Channel and status string constants (mirror the DB CHECK constraints).
 const (
-	ChannelInApp = "in_app"
-	ChannelEmail = "email"
+	ChannelInApp     = "in_app"
+	ChannelEmail     = "email"
+	ChannelSlack     = "slack"
+	ChannelTeams     = "teams"
+	ChannelLineWorks = "line_works"
 
 	// notifications.status
 	NotificationStatusCreated   = "created"
