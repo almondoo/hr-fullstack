@@ -26,6 +26,9 @@ var (
 	ErrInvalidTransition   = errors.New("leave: invalid request status transition")
 	ErrInvalidLeaveType    = errors.New("leave: invalid leave type")
 	ErrInvalidDates        = errors.New("leave: start_date must not be after end_date")
+	// ErrInvalidSettingsJSON is returned when a supplied JSON table column fails
+	// structural validation (wrong type, missing required fields, out-of-range values).
+	ErrInvalidSettingsJSON = errors.New("leave: invalid settings JSON structure")
 )
 
 // validLeaveTypes is the allow-list for leave_type values.
@@ -85,7 +88,7 @@ func (s *Service) GetSettings(ctx context.Context, tenantID uuid.UUID) (*Setting
 		return tx.Raw(
 			`SELECT id, tenant_id, base_date_rule, grant_table_json,
 			        proportional_table_json, five_day_obligation_threshold,
-			        expiry_months, updated_at
+			        expiry_months, created_at, updated_at
 			 FROM leave_settings
 			 WHERE tenant_id = ?
 			 LIMIT 1`,
@@ -113,8 +116,96 @@ type UpsertSettingsInput struct {
 	IP                         *string
 }
 
+// validateGrantTableJSON checks that the raw bytes, when supplied, decode into
+// a non-empty array of GrantEntry values and that each entry is structurally
+// valid (TenureMonthsMin >= 0, GrantDays > 0, min <= max when max is set).
+// Returns nil when raw is empty, "null", or "[]" (omitted/no-op case).
+// On failure returns an error wrapping ErrInvalidSettingsJSON.
+func validateGrantTableJSON(raw []byte) error {
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "[]" {
+		return nil
+	}
+	var entries []GrantEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return fmt.Errorf("grant_table_json must be an array of grant entries: %w: %w", err, ErrInvalidSettingsJSON)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("grant_table_json must contain at least one entry: %w", ErrInvalidSettingsJSON)
+	}
+	for i, e := range entries {
+		if e.TenureMonthsMin < 0 {
+			return fmt.Errorf("grant_table_json[%d].tenure_months_min must be >= 0: %w", i, ErrInvalidSettingsJSON)
+		}
+		if e.GrantDays <= 0 {
+			return fmt.Errorf("grant_table_json[%d].grant_days must be > 0: %w", i, ErrInvalidSettingsJSON)
+		}
+		if e.TenureMonthsMax != nil && *e.TenureMonthsMax < e.TenureMonthsMin {
+			return fmt.Errorf(
+				"grant_table_json[%d].tenure_months_max (%d) must be >= tenure_months_min (%d): %w",
+				i, *e.TenureMonthsMax, e.TenureMonthsMin, ErrInvalidSettingsJSON,
+			)
+		}
+	}
+	return nil
+}
+
+// validateProportionalTableJSON checks that the raw bytes, when supplied,
+// decode into a non-empty array of ProportionalGroup values and that each
+// group has WeeklyDays > 0 and at least one structurally valid entry.
+// Returns nil when raw is empty, "null", or "[]".
+// On failure returns an error wrapping ErrInvalidSettingsJSON.
+func validateProportionalTableJSON(raw []byte) error {
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "[]" {
+		return nil
+	}
+	var groups []ProportionalGroup
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return fmt.Errorf("proportional_table_json must be an array of proportional groups: %w: %w", err, ErrInvalidSettingsJSON)
+	}
+	if len(groups) == 0 {
+		return fmt.Errorf("proportional_table_json must contain at least one group: %w", ErrInvalidSettingsJSON)
+	}
+	for gi, g := range groups {
+		if g.WeeklyDays <= 0 {
+			return fmt.Errorf("proportional_table_json[%d].weekly_days must be > 0: %w", gi, ErrInvalidSettingsJSON)
+		}
+		if len(g.Entries) == 0 {
+			return fmt.Errorf("proportional_table_json[%d].entries must not be empty: %w", gi, ErrInvalidSettingsJSON)
+		}
+		for ei, e := range g.Entries {
+			if e.TenureMonthsMin < 0 {
+				return fmt.Errorf(
+					"proportional_table_json[%d].entries[%d].tenure_months_min must be >= 0: %w",
+					gi, ei, ErrInvalidSettingsJSON,
+				)
+			}
+			if e.GrantDays <= 0 {
+				return fmt.Errorf(
+					"proportional_table_json[%d].entries[%d].grant_days must be > 0: %w",
+					gi, ei, ErrInvalidSettingsJSON,
+				)
+			}
+			if e.TenureMonthsMax != nil && *e.TenureMonthsMax < e.TenureMonthsMin {
+				return fmt.Errorf(
+					"proportional_table_json[%d].entries[%d].tenure_months_max (%d) must be >= tenure_months_min (%d): %w",
+					gi, ei, *e.TenureMonthsMax, e.TenureMonthsMin, ErrInvalidSettingsJSON,
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // UpsertSettings creates or updates leave settings for a tenant.
 func (s *Service) UpsertSettings(ctx context.Context, in UpsertSettingsInput) (*Setting, error) {
+	// Validate JSON structure before opening a DB transaction.
+	if err := validateGrantTableJSON(in.GrantTableJSON); err != nil {
+		return nil, err
+	}
+	if err := validateProportionalTableJSON(in.ProportionalTableJSON); err != nil {
+		return nil, err
+	}
+
 	var setting Setting
 	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
 		// Check whether a row already exists.
@@ -215,7 +306,7 @@ func (s *Service) UpsertSettings(ctx context.Context, in UpsertSettingsInput) (*
 		if err := tx.Raw(
 			`SELECT id, tenant_id, base_date_rule, grant_table_json,
 			        proportional_table_json, five_day_obligation_threshold,
-			        expiry_months, updated_at
+			        expiry_months, created_at, updated_at
 			 FROM leave_settings WHERE tenant_id = ? LIMIT 1`,
 			in.TenantID,
 		).Scan(&setting).Error; err != nil {

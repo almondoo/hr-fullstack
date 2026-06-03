@@ -139,6 +139,10 @@ func (h *Handler) UpsertSettings(c *gin.Context) {
 		IP:                         clientIP(c),
 	})
 	if err != nil {
+		if errors.Is(err, ErrInvalidSettingsJSON) {
+			httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+			return
+		}
 		httpx.RespondInternalError(c)
 		return
 	}
@@ -559,6 +563,7 @@ type SettingResponse struct {
 	ProportionalTableJSON      json.RawMessage `json:"proportional_table_json"`
 	FiveDayObligationThreshold int             `json:"five_day_obligation_threshold"`
 	ExpiryMonths               int             `json:"expiry_months"`
+	CreatedAt                  string          `json:"created_at"`
 	UpdatedAt                  string          `json:"updated_at"`
 }
 
@@ -579,6 +584,7 @@ func toSettingResponse(s *Setting) SettingResponse {
 		ProportionalTableJSON:      pj,
 		FiveDayObligationThreshold: s.FiveDayObligationThreshold,
 		ExpiryMonths:               s.ExpiryMonths,
+		CreatedAt:                  s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:                  s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }
