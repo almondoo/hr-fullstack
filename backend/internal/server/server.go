@@ -185,6 +185,11 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		r.Use(corsMiddleware(origins, cfg))
 	}
 	r.Use(httpx.RequestID())
+	// OTel trace + metrics middleware: registers a span and HTTP server metrics
+	// for each request.  Registered after RequestID so the request-ID is
+	// available in the context when the span is started.
+	// When OTel is disabled (no-op providers), this is effectively zero-cost.
+	r.Use(httpx.OTelMiddleware())
 	r.Use(httpx.RequestLogger(logger))
 
 	// --- Health / readiness ---

@@ -28,6 +28,7 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/logging"
 	"github.com/your-org/hr-saas/internal/platform/migrate"
+	platformotel "github.com/your-org/hr-saas/internal/platform/otel"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 	"github.com/your-org/hr-saas/internal/server"
 )
@@ -47,6 +48,36 @@ func main() {
 	// Promote to package-level default so third-party code that calls
 	// slog.Info / slog.Error directly inherits this configuration.
 	slog.SetDefault(logger)
+
+	// --- 2b. OpenTelemetry providers ---
+	// Init registers global TracerProvider and MeterProvider.  When OTEL_ENABLED
+	// is false or OTEL_EXPORTER_OTLP_ENDPOINT is empty, no-op providers are
+	// registered so instrumentation compiles and runs without any I/O.
+	//
+	// The shutdown function flushes pending telemetry before the process exits.
+	// It is deferred immediately so that even an early os.Exit path in step 3/4
+	// does NOT silently swallow spans; the deferred call still fires on normal
+	// return (steps that call os.Exit bypass defer — that is acceptable because
+	// those paths indicate unrecoverable startup failures).
+	otelCtx := context.Background()
+	otelShutdown, err := platformotel.Init(
+		otelCtx,
+		cfg.OTelEnabled,
+		cfg.OTelExporterOTLPEndpoint,
+		cfg.OTelServiceName,
+		logger,
+	)
+	if err != nil {
+		logger.Error("otel: failed to initialise providers", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			logger.Warn("otel: shutdown returned error", "error", err)
+		}
+	}()
 
 	// --- 3. Migrations (optional, controlled by MIGRATE_ON_STARTUP) ---
 	// Runs before the application pool is opened so that hr_app can connect
