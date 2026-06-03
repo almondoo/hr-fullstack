@@ -213,11 +213,21 @@ func loadFromEnv() (*FieldCipher, error) {
 		"Set FIELD_ENCRYPTION_KEY for persistent encryption.",
 		"env", envKey,
 	)
+	key, err := generateEphemeralKey()
+	if err != nil {
+		return nil, err
+	}
+	return NewFieldCipher(key)
+}
+
+// generateEphemeralKey produces a random 32-byte key for local development
+// fallback.  The key is lost on process restart; never use in production.
+func generateEphemeralKey() ([]byte, error) {
 	key := make([]byte, keySize)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("crypto: generate ephemeral key: %w", err)
 	}
-	return NewFieldCipher(key)
+	return key, nil
 }
 
 // ResetGlobalForTest resets the package-level singleton so tests can inject
