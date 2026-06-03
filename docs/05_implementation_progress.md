@@ -80,7 +80,9 @@
 
 ## 5. 残バックログ（P2/P3/P4）
 
-### P2 残スライス → ✅ 全完了（新規18パッケージ・migration 00009〜00026・未コミット）
+> 📌 **残タスクの一次情報・次セッション着手手順は [`docs/06_remaining_tasks.md`](06_remaining_tasks.md)**（ハンドオフ台帳）。本節は概要。
+
+### P2 残スライス → ✅ 全完了（新規18パッケージ・migration 00009〜00026・コミット済 `59b4122`〜`e7a1072`）＋ P3一部是正（脆弱性/lint0/複合FKハードニング `4baa1f7`〜`6d0f735`）
 
 各スライスは「実装 → 実DB(testcontainers)検証 → 独立セキュリティレビュー → MUST_FIX修正 → lint整理」サイクルで実装。全パッケージ `go test -race` グリーン、golangci-lint 0、`go build/vet ./...` exit 0。
 
