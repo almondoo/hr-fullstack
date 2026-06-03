@@ -39,18 +39,36 @@ import (
 	"github.com/ulule/limiter/v3/drivers/store/memory"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/applicant"
 	"github.com/your-org/hr-saas/internal/approval"
 	"github.com/your-org/hr-saas/internal/attendance"
 	internalauth "github.com/your-org/hr-saas/internal/auth"
+	"github.com/your-org/hr-saas/internal/billing"
 	"github.com/your-org/hr-saas/internal/department"
 	"github.com/your-org/hr-saas/internal/employee"
+	"github.com/your-org/hr-saas/internal/evaluation"
+	"github.com/your-org/hr-saas/internal/goal"
+	"github.com/your-org/hr-saas/internal/govfiling"
+	"github.com/your-org/hr-saas/internal/hiring"
+	"github.com/your-org/hr-saas/internal/interview"
+	"github.com/your-org/hr-saas/internal/jobposting"
 	"github.com/your-org/hr-saas/internal/leave"
+	"github.com/your-org/hr-saas/internal/ledger"
+	"github.com/your-org/hr-saas/internal/mynumber"
+	"github.com/your-org/hr-saas/internal/notification"
+	"github.com/your-org/hr-saas/internal/offer"
 	"github.com/your-org/hr-saas/internal/onboarding"
+	"github.com/your-org/hr-saas/internal/oneonone"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/httpx"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
+	"github.com/your-org/hr-saas/internal/reporting"
+	"github.com/your-org/hr-saas/internal/selection"
+	"github.com/your-org/hr-saas/internal/selfservice"
+	"github.com/your-org/hr-saas/internal/talent"
+	"github.com/your-org/hr-saas/internal/workrule"
 )
 
 // Server holds the gin.Engine and its CSRF-wrapped http.Handler together.
@@ -246,6 +264,30 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 
 		// --- Onboarding / offboarding routes (入退社 ST-LM-07) ---
 		onboarding.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- Notification platform routes (通知) ---
+		notification.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- My Number routes (マイナンバー) ---
+		mynumber.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+
+		// --- Newly wired domain routes ---
+		jobposting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		goal.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		reporting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		govfiling.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		ledger.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		billing.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		selfservice.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		applicant.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		workrule.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		selection.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		offer.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		evaluation.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		oneonone.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		interview.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		hiring.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		talent.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}

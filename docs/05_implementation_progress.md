@@ -1,6 +1,6 @@
 # 05. 実装進捗（Build State / Progress Report）
 
-最終更新: 2026-06-03 / ステータス: **P2 MVPスライス実装中**
+最終更新: 2026-06-03 / ステータス: **P2 MVP 全スライス実装完了（自己検証PASS・新規18パッケージ未コミット）**
 
 本書は `00_master_workflow.md` のワークフローに基づく実装進捗のまとめ。各スライスは「実装 → 実DB(testcontainers)検証 → 独立セキュリティレビュー → ハードニング → ローカルコミット」のサイクルで進行。push・公開は未実施（許可が必要なため）。
 
@@ -12,7 +12,7 @@
 |---|---|
 | P0 Orientation & Backlog | ✅ 完了（Gate0 承認済み） |
 | P1 Foundation（基盤） | ✅ 完了（Gate1 自己検証 PASS） |
-| P2 MVP Feature Slices | 🔄 実装中（入退社まで7スライス群コミット済） |
+| P2 MVP Feature Slices | ✅ 全領域実装完了（既コミット7群 ＋ 新規18パッケージ未コミット。`go build/vet ./...`・`go test ./... -race -p4` 全緑、新規パッケージ golangci-lint 0） |
 | P3 Integration & Hardening | ⏳ 未着手 |
 | P4 Release Readiness | ⏳ 未着手 |
 
@@ -80,11 +80,34 @@
 
 ## 5. 残バックログ（P2/P3/P4）
 
-### P2 残スライス
-- **EP-LM(人事労務)**: ST-LM-07 入退社(コミット待ち)、ST-LM-08 社保/労保 帳票・電子申請(e-Gov/マイナポータル)、ST-LM-09 マイナンバー(暗号化保管/厳格アクセス制御/利用提供ログ/廃棄)、ST-LM-10 法定三帳簿/保存年限＋給与SaaS連携、ST-LM-11 就業規則/労使協定 版管理。
-- **EP-FND(基盤機能)**: ST-FND-04 テナント/プラン/サブスク/課金(モック決済)、ST-FND-09 通知(アプリ内/メール)、ST-FND-10 セルフサービス/CSV一括取込/ファイル保管、ST-FND-11 標準帳票/エクスポート/カレンダー・勤務体系マスタ。
-- **EP-ATS(採用)**: ST-ATS-01〜06 求人/応募者DB/選考PL/面接調整・評価/オファー/オンボーディング。
-- **EP-TM(タレマネ)**: ST-TM-01〜04 目標MBO/OKR/評価WF/1on1/人材DB・スキルマップ・配置。
+### P2 残スライス → ✅ 全完了（新規18パッケージ・migration 00009〜00026・未コミット）
+
+各スライスは「実装 → 実DB(testcontainers)検証 → 独立セキュリティレビュー → MUST_FIX修正 → lint整理」サイクルで実装。全パッケージ `go test -race` グリーン、golangci-lint 0、`go build/vet ./...` exit 0。
+
+| ストーリー | パッケージ | migration |
+|---|---|---|
+| ST-FND-09 通知基盤(アプリ内/メールmock/テンプレ/配信記録/既読/リマインド) | `notification` | 00009 |
+| ST-LM-09 マイナンバー(分離ストア/AES-256-GCM/利用目的/復号RBAC再検証/利用提供ログ/廃棄) | `mynumber` | 00010 |
+| ST-ATS-01 求人票作成・公開・ステータス管理(項目別権限) | `jobposting` | 00011 |
+| ST-TM-01 目標MBO/OKR・カスケード(所有権強制・親リンク保持) | `goal` | 00012 |
+| ST-FND-11 標準帳票/CSV・SpreadsheetMLエクスポート/カレンダー・勤務体系 | `reporting` | 00013 |
+| ST-LM-08 社保/労保 帳票生成・電子申請(e-Gov/マイナポータルmockアダプタ/冪等/公文書暗号) | `govfiling` | 00014 |
+| ST-LM-10 法定三帳簿/保存年限+給与SaaS連携(mockアダプタ) | `ledger` | 00015 |
+| ST-FND-04 テナント/プラン/サブスク/従量+定額課金/モック決済(invoiceイミュータブル) | `billing` | 00016 |
+| ST-FND-10 セルフサービス/CSV一括取込(検証付)/ファイル保管(暗号・版管理・保持期間) | `selfservice` | 00017 |
+| ST-ATS-02 応募者DB(取込/重複統合/PII・同意管理) | `applicant` | 00018 |
+| ST-LM-11 就業規則/労使協定 版管理・周知/同意・有効期限アラート | `workrule` | 00019 |
+| ST-ATS-03 選考パイプライン(ステージ/カンバン/通知) | `selection` | 00020 |
+| ST-ATS-05 内定/オファー管理(発行/電子署名mock/受諾) | `offer` | 00021 |
+| ST-TM-02 評価WF(自己/上司/二次/360度匿名/キャリブレーション) | `evaluation` | 00022 |
+| ST-TM-03 1on1(アジェンダ/記録/アクション・参加者ゲート) | `oneonone` | 00023 |
+| ST-ATS-04 面接調整(候補日/リマインド)・評価収集 | `interview` | 00024 |
+| ST-ATS-06 オンボーディング連携(候補者→従業員生成/入社タスク) | `hiring` | 00025 |
+| ST-TM-04 人材DB・スキルマップ・配置(統合プロフィール/組織図/配置シミュ) | `talent` | 00026 |
+
+> 横断参照(他新規ストーリーの表)は素のuuid列+index(複合FKは繰越ハードニング)。既存表(employees/departments)参照は複合FK。`users` には UNIQUE(id,tenant_id) が無いため user参照はサービス層検証+RLSの多層防御。法令値(料率/保存年限/閾値/有効期限リードタイム等)は全て設定化(要社労士/弁護士確認・改正追従)。
+>
+> **残課題(P3で対応)**: (a) `govulncheck` 3件 — stdlib 2件(GO-2026-5039 net/textproto, GO-2026-5037 crypto/x509。go1.26.4で解消) ＋ gorilla/csrf@v1.7.3 GO-2025-3884(Fix未提供、TrustedOrigins設定の見直しで緩和)。いずれも新規コード起因ではない。(b) `make lint` 既存パッケージ pre-existing 76件(attendance43/leave12/employee7/onboarding6/approval6/department2。新規18は0)。(c) 横断複合FK化・cross-storyの実連携(通知配信・マイナンバー提供・候補者→従業員)・実外部API(e-Gov/給与SaaS/決済)。
 
 ### P3 Integration & Hardening
 - `docker compose up --build` 起動確認(/healthz /readyz＋主要フロー)。
