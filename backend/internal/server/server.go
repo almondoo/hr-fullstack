@@ -69,6 +69,7 @@ import (
 	"github.com/your-org/hr-saas/internal/selfservice"
 	"github.com/your-org/hr-saas/internal/talent"
 	"github.com/your-org/hr-saas/internal/workrule"
+	"github.com/your-org/hr-saas/internal/yearend"
 )
 
 // Server holds the gin.Engine and its CSRF-wrapped http.Handler together.
@@ -308,6 +309,7 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		interview.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		hiring.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		talent.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		yearend.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}
