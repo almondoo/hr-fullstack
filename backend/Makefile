@@ -1,4 +1,4 @@
-.PHONY: build test lint vuln migrate-up tidy
+.PHONY: build test lint vuln migrate-up tidy smoke
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 build:
@@ -21,6 +21,11 @@ vuln:
 # ── Migrations ────────────────────────────────────────────────────────────────
 migrate-up:
 	go run ./cmd/migrate up
+
+# ── Smoke test (requires compose stack up) ────────────────────────────────────
+# Run after `docker compose up -d`. Default port 18080 (host-side override).
+smoke:
+	../scripts/smoke.sh http://localhost:18080
 
 # ── Module hygiene ────────────────────────────────────────────────────────────
 tidy:

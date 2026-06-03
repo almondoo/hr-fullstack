@@ -28,27 +28,28 @@ set -e
 : "${POSTGRES_USER:?POSTGRES_USER environment variable must be set}"
 : "${POSTGRES_DB:?POSTGRES_DB environment variable must be set}"
 
-psql -v ON_ERROR_STOP=1 \
-     -v hr_app_pass="$HR_APP_DB_PASSWORD" \
-     --username "$POSTGRES_USER" \
-     --dbname   "$POSTGRES_DB" \
-     <<-'EOSQL'
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT FROM pg_catalog.pg_roles WHERE rolname = 'hr_app'
-    ) THEN
-        CREATE ROLE hr_app
-            LOGIN
-            PASSWORD :'hr_app_pass'
-            NOSUPERUSER
-            NOBYPASSRLS
-            NOCREATEDB
-            NOCREATEROLE;
-        RAISE NOTICE 'Role hr_app created.';
-    ELSE
-        RAISE NOTICE 'Role hr_app already exists — skipping creation.';
-    END IF;
-END
-$$;
+# Check whether the role already exists before creating it.
+# psql variable substitution (:'var') does not work inside PL/pgSQL DO blocks,
+# so we use a shell-level conditional and a plain SQL CREATE ROLE statement where
+# psql can substitute the quoted literal safely.
+ROLE_EXISTS=$(psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+                   -tAc "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'hr_app'")
+
+if [ "$ROLE_EXISTS" = "1" ]; then
+    echo "Role hr_app already exists — skipping creation."
+else
+    psql -v ON_ERROR_STOP=1 \
+         -v hr_app_pass="$HR_APP_DB_PASSWORD" \
+         --username "$POSTGRES_USER" \
+         --dbname   "$POSTGRES_DB" \
+         <<-'EOSQL'
+CREATE ROLE hr_app
+    LOGIN
+    PASSWORD :'hr_app_pass'
+    NOSUPERUSER
+    NOBYPASSRLS
+    NOCREATEDB
+    NOCREATEROLE;
 EOSQL
+    echo "Role hr_app created."
+fi
