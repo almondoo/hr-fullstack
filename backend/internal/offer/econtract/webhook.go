@@ -22,7 +22,7 @@
 //   - Webhook ペイロードの真正性を必ず検証すること (HMAC-SHA256 等).
 //   - エラーメッセージ・ログに認証情報 / PII を含めてはならない.
 //   - signer_ref には PII を格納してはならない (opaque ID のみ).
-//   - リプレイ攻撃対策: タイムスタンプ検証・idempotency チェックを行うこと (TODO).
+//   - リプレイ攻撃対策: タイムスタンプ検証・idempotency チェックを行うこと.
 package econtract
 
 import (
@@ -31,9 +31,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +47,10 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/httpx"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
+
+// replayWindowSeconds is the maximum allowed age (and future drift) of a
+// webhook timestamp before the request is rejected as a potential replay.
+const replayWindowSeconds = 5 * 60 // 5 minutes
 
 // WebhookHandler handles inbound webhook payloads from the electronic-contract
 // service provider.
@@ -65,13 +72,27 @@ func NewWebhookHandler(tdb *tenantdb.TenantDB, cfg Config, adapter Adapter) *Web
 //
 //	POST /webhooks/econtract — inbound signing events from the provider
 //
+// Security: Routes are registered only when the adapter is a stub provider
+// OR when WebhookSigningKey is configured. For non-stub providers with an
+// empty key, this function returns a non-nil error and no route is registered,
+// preventing accidental unauthenticated webhook exposure in production.
+//
 // Example wiring (in server/router.go or equivalent):
 //
 //	webhookGroup := router.Group("/webhooks")
-//	econtract.RegisterWebhookRoutes(webhookGroup, tdb, cfg, adapter)
-func RegisterWebhookRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, cfg Config, adapter Adapter) {
+//	if err := econtract.RegisterWebhookRoutes(webhookGroup, tdb, cfg, adapter); err != nil {
+//	    log.Fatalf("econtract webhook: %v", err)
+//	}
+func RegisterWebhookRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, cfg Config, adapter Adapter) error {
+	if !adapter.IsStubProvider() && cfg.WebhookSigningKey == "" {
+		return fmt.Errorf(
+			"econtract: RegisterWebhookRoutes: WebhookSigningKey must be set for non-stub provider %q",
+			adapter.ProviderLabel(),
+		)
+	}
 	h := NewWebhookHandler(tdb, cfg, adapter)
 	rg.POST("/econtract", h.HandleWebhook)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -109,44 +130,65 @@ type webhookEvent struct {
 //
 // Flow:
 //  1. Read body with limit (64 KB).
-//  2. Verify HMAC-SHA256 signature when cfg.WebhookSigningKey is set.
-//     When the key is empty, verification is skipped and a warning is logged
-//     (not recommended for production).
-//  3. Parse the normalised webhook event envelope.
-//  4. Delegate to processEvent for DB update.
+//  2. Fail-closed: if WebhookSigningKey is not configured, return 503 immediately.
+//  3. Verify X-EContract-Timestamp: reject requests outside the 5-minute window.
+//  4. Verify HMAC-SHA256 signature over "<timestamp>.<body>".
+//  5. Parse the normalised webhook event envelope.
+//  6. Delegate to processEvent for idempotency check + DB update.
 //
 // Always returns 200 OK to prevent provider retry storms on non-retryable
 // parse errors. Retryable errors (e.g. DB unavailable) return 500.
 //
 // Production follow-up:
 //   - Implement per-provider payload parsers (TODO(real-econtract)).
-//   - Add timestamp validation and replay-protection window check.
 //   - Confirm Webhook signature algorithm / header name per provider API docs.
 func (h *WebhookHandler) HandleWebhook(c *gin.Context) {
+	// Fail-closed: refuse all requests when signing key is not configured.
+	if h.cfg.WebhookSigningKey == "" {
+		httpx.RespondError(c, http.StatusServiceUnavailable, "UNCONFIGURED",
+			"webhook signature verification not configured")
+		return
+	}
+
 	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 64*1024))
 	if err != nil {
 		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", "failed to read body")
 		return
 	}
 
-	// Signature verification.
-	if h.cfg.WebhookSigningKey != "" {
-		sig := c.GetHeader("X-EContract-Signature")
-		if !verifyHMACSHA256(rawBody, sig, h.cfg.WebhookSigningKey) {
-			slog.Warn("econtract: webhook: signature verification failed",
-				"provider", h.adapter.ProviderLabel(),
-			)
-			// Return 403 to signal the provider that the key is misconfigured,
-			// rather than 200 (which would silently swallow the security failure).
-			httpx.RespondError(c, http.StatusForbidden, "FORBIDDEN", "invalid signature")
-			return
-		}
-	} else {
-		// Log at Warn level when signature verification is not configured.
-		// In production, always set ECONTRACT_WEBHOOK_SIGNING_KEY.
-		slog.Warn("econtract: webhook: signature verification skipped (WebhookSigningKey not configured)",
+	// Timestamp validation — replay protection step 1.
+	tsHeader := c.GetHeader("X-EContract-Timestamp")
+	if tsHeader == "" {
+		httpx.RespondError(c, http.StatusBadRequest, "MISSING_TIMESTAMP",
+			"X-EContract-Timestamp header required")
+		return
+	}
+	tsUnix, parseErr := strconv.ParseInt(tsHeader, 10, 64)
+	if parseErr != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_TIMESTAMP",
+			"X-EContract-Timestamp must be a Unix epoch integer")
+		return
+	}
+	diff := time.Now().Unix() - tsUnix
+	if math.Abs(float64(diff)) > replayWindowSeconds {
+		slog.Warn("econtract: webhook: timestamp outside replay window",
 			"provider", h.adapter.ProviderLabel(),
 		)
+		httpx.RespondError(c, http.StatusBadRequest, "TIMESTAMP_EXPIRED",
+			"request timestamp outside acceptable window")
+		return
+	}
+
+	// Signature verification — signed over "<timestamp>.<body>".
+	sig := c.GetHeader("X-EContract-Signature")
+	if !verifyHMACSHA256(tsHeader, rawBody, sig, h.cfg.WebhookSigningKey) {
+		slog.Warn("econtract: webhook: signature verification failed",
+			"provider", h.adapter.ProviderLabel(),
+		)
+		// Return 403 to signal the provider that the key is misconfigured,
+		// rather than 200 (which would silently swallow the security failure).
+		httpx.RespondError(c, http.StatusForbidden, "FORBIDDEN", "invalid signature")
+		return
 	}
 
 	// TODO(real-econtract): provider-specific payload parsing.
@@ -176,9 +218,11 @@ func (h *WebhookHandler) HandleWebhook(c *gin.Context) {
 // Returns true when the error is retryable (DB unavailable etc.) so the caller
 // can return 500 and allow the provider to retry.
 //
-// Transaction boundary: the offer_letters UPDATE and the audit record are
-// written in a single WithinTenant transaction. A failure rolls back both,
-// preserving consistency.
+// Transaction boundary: the idempotency INSERT, the offer_letters UPDATE, and
+// the audit record are written in a single WithinTenant transaction. A failure
+// rolls back all three, preserving consistency. When the idempotency row already
+// exists (duplicate delivery), RowsAffected==0 and processing is skipped without
+// error, returning 200 to the provider.
 func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (retryable bool) {
 	tenantID, err := uuid.Parse(ev.TenantID)
 	if err != nil || tenantID == uuid.Nil {
@@ -216,8 +260,30 @@ func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (ret
 	}
 
 	systemActorID := uuid.Nil // webhook has no human actor
+	provider := h.adapter.ProviderLabel()
 
 	dbErr := h.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		// Idempotency check: attempt to record this event. If the row already
+		// exists (same tenant_id + provider + envelope_id + status), ON CONFLICT
+		// DO NOTHING returns RowsAffected == 0, and we skip the rest.
+		idempRes := tx.Exec(
+			`INSERT INTO econtract_webhook_events
+			   (tenant_id, provider, envelope_id, status, received_at)
+			 VALUES (?, ?, ?, ?, now())
+			 ON CONFLICT (tenant_id, provider, envelope_id, status) DO NOTHING`,
+			tenantID, provider, ev.EnvelopeID, ev.Status,
+		)
+		if idempRes.Error != nil {
+			return idempRes.Error
+		}
+		if idempRes.RowsAffected == 0 {
+			// Already processed — skip silently (idempotent delivery).
+			slog.Info("econtract: webhook: duplicate event skipped",
+				"provider", provider,
+			)
+			return nil
+		}
+
 		// Idempotent update: only write when the row has not already been marked
 		// completed for this envelope (prevents duplicate webhook replays).
 		res := tx.Exec(
@@ -229,7 +295,7 @@ func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (ret
 			 WHERE  id        = ?
 			   AND  tenant_id = ?
 			   AND  (signed_at IS NULL OR esign_envelope_id = ?)`,
-			h.adapter.ProviderLabel(), ev.EnvelopeID, signedAt,
+			provider, ev.EnvelopeID, signedAt,
 			letterID, tenantID,
 			ev.EnvelopeID,
 		)
@@ -249,7 +315,7 @@ func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (ret
 	if dbErr != nil {
 		slog.Error("econtract: webhook: DB update failed",
 			"offer_letter_id", letterID.String(),
-			"provider", h.adapter.ProviderLabel(),
+			"provider", provider,
 			"error", dbErr.Error(),
 		)
 		return true // retryable
@@ -257,7 +323,7 @@ func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (ret
 
 	slog.Info("econtract: webhook: processed",
 		"offer_letter_id", letterID.String(),
-		"provider", h.adapter.ProviderLabel(),
+		"provider", provider,
 		"status", ev.Status,
 	)
 	return false
@@ -267,20 +333,28 @@ func (h *WebhookHandler) processEvent(ctx context.Context, ev webhookEvent) (ret
 // Helpers
 // ---------------------------------------------------------------------------
 
-// verifyHMACSHA256 verifies an HMAC-SHA256 hex-encoded signature over body.
+// verifyHMACSHA256 verifies an HMAC-SHA256 hex-encoded signature over
+// "<timestamp>.<body>".
 //
 // The provider is expected to send:
 //
-//	X-EContract-Signature: hex(HMAC-SHA256(signingKey, body))
+//	X-EContract-Timestamp: <unix-epoch>
+//	X-EContract-Signature: hex(HMAC-SHA256(signingKey, timestamp + "." + body))
+//
+// Including the timestamp in the HMAC input binds the signature to the specific
+// request time, preventing replay attacks where a valid signature is reused
+// with a modified timestamp header.
 //
 // TODO(real-econtract): confirm the exact header name, encoding (hex vs base64),
-// and HMAC input (body only vs timestamp+body) per each provider's API docs.
+// and HMAC input per each provider's API docs.
 // クラウドサイン / DocuSign / Adobe Sign それぞれで異なる可能性がある。
-func verifyHMACSHA256(body []byte, sigHeader, signingKey string) bool {
+func verifyHMACSHA256(timestamp string, body []byte, sigHeader, signingKey string) bool {
 	if sigHeader == "" {
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(signingKey))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
 	mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(sigHeader))

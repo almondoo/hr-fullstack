@@ -207,6 +207,12 @@ type Adapter interface {
 	// ProviderLabel returns the short label stored in offer_letters.esign_provider
 	// (e.g. "cloudsign", "docusign", "stub").
 	ProviderLabel() string
+
+	// IsStubProvider reports whether this adapter is the no-op stub used during
+	// development / testing. RegisterWebhookRoutes uses this to allow stub
+	// adapters to operate without a WebhookSigningKey, while enforcing that
+	// non-stub (real) adapters always have a key configured.
+	IsStubProvider() bool
 }
 
 // ---------------------------------------------------------------------------
@@ -259,3 +265,6 @@ func (stubAdapter) GetSignStatus(_ context.Context, envelopeID string) (SignStat
 
 // ProviderLabel returns "stub".
 func (stubAdapter) ProviderLabel() string { return "stub" }
+
+// IsStubProvider returns true — the stub adapter does not require a signing key.
+func (stubAdapter) IsStubProvider() bool { return true }

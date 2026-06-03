@@ -61,6 +61,7 @@ func assignRole(t *testing.T, adminDB *gorm.DB, userID, roleID uuid.UUID) {
 func truncateAll(h *testdb.Harness) {
 	h.TruncateTables(
 		"audit_logs",
+		"econtract_webhook_events",
 		"offer_responses",
 		"offer_letters",
 		"offers",
