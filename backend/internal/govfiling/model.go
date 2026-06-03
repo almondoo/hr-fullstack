@@ -59,6 +59,9 @@ const (
 	FilingEmploymentInsuranceLose = "employment_insurance_lose"
 	FilingEmploymentInsuranceSep  = "employment_insurance_separation"
 	FilingWorkersCompReport       = "workers_comp_report"
+	// FilingArticle36 is the 36協定 e-Gov 電子届出 filing type (Issue #21 足場).
+	// Real submission awaits e-Gov sandbox credentials (外部依存: 認証情報待ち).
+	FilingArticle36 = "article36_filing"
 )
 
 // Document kinds (公文書/帳票の種別).

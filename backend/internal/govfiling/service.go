@@ -160,6 +160,9 @@ type Service struct {
 	tdb              *tenantdb.TenantDB
 	submitter        Submitter
 	mynumberProvider MynumberProvider
+	// egovSubmitter handles 36協定-specific e-Gov submissions (Issue #21 足場).
+	// nil until configured via WithEGovSubmitter; stub or real adapter in P3.
+	egovSubmitter EGovSubmitter
 }
 
 // NewService constructs a Service using the MVP mock submitter and no
@@ -172,14 +175,14 @@ func NewService(tdb *tenantdb.TenantDB) *Service {
 // WithSubmitter returns a copy of the Service using the given Submitter.
 // Used by tests and (future) production wiring to swap the e-Gov/マイナポータル adapter.
 func (s *Service) WithSubmitter(sub Submitter) *Service {
-	return &Service{tdb: s.tdb, submitter: sub, mynumberProvider: s.mynumberProvider}
+	return &Service{tdb: s.tdb, submitter: sub, mynumberProvider: s.mynumberProvider, egovSubmitter: s.egovSubmitter}
 }
 
 // WithMynumberProvider returns a copy of the Service using the given
 // MynumberProvider.  Used by production wiring to inject the mynumber.Service
 // adapter for social-insurance filings that require a 個人番号.
 func (s *Service) WithMynumberProvider(p MynumberProvider) *Service {
-	return &Service{tdb: s.tdb, submitter: s.submitter, mynumberProvider: p}
+	return &Service{tdb: s.tdb, submitter: s.submitter, mynumberProvider: p, egovSubmitter: s.egovSubmitter}
 }
 
 // ---------------------------------------------------------------------------

@@ -63,6 +63,9 @@ func isFilingTransitionAllowed(current, next string) bool {
 // Service provides business logic for the workrule domain.
 type Service struct {
 	tdb *tenantdb.TenantDB
+	// egovBridge connects 36協定 documents to govfiling (dependency inversion).
+	// Set via WithEGovBridge; nil until configured (stub mode).
+	egovBridge EGovFilingBridge
 }
 
 // NewService constructs a Service.
@@ -793,7 +796,7 @@ func (s *Service) GetAgreement(ctx context.Context, tenantID, id uuid.UUID) (*La
 		return tx.Raw(
 			"SELECT id, tenant_id, title, agreement_type, version, valid_from, valid_to,\n"+
 				"        filing_status, filed_at, accepted_at, document_ref,\n"+
-				"        linked_labor_agreement_id, renewal_alert_at, created_by,\n"+ //nolint:misspell // DB column name is schema contract
+				"        linked_labor_agreement_id, renewal_alert_at, govfiling_id, created_by,\n"+ //nolint:misspell // DB column name is schema contract
 				"        created_at, updated_at FROM labor_agreement_documents WHERE id = ? AND tenant_id = ? LIMIT 1", //nolint:misspell // DB table name is schema contract
 			id, tenantID,
 		).Scan(&doc).Error
@@ -814,7 +817,7 @@ func (s *Service) ListAgreements(ctx context.Context, tenantID uuid.UUID, agreem
 	err := s.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
 		q := "SELECT id, tenant_id, title, agreement_type, version, valid_from, valid_to,\n" +
 			"             filing_status, filed_at, accepted_at, document_ref,\n" +
-			"             linked_labor_agreement_id, renewal_alert_at, created_by,\n" + //nolint:misspell // DB column name is schema contract
+			"             linked_labor_agreement_id, renewal_alert_at, govfiling_id, created_by,\n" + //nolint:misspell // DB column name is schema contract
 			"             created_at, updated_at FROM labor_agreement_documents WHERE tenant_id = ?" //nolint:misspell // DB table name is schema contract
 		args := []any{tenantID}
 		if agreementType != "" {
@@ -888,7 +891,7 @@ func (s *Service) UpdateFilingStatus(ctx context.Context, in UpdateFilingStatusI
 		if err := tx.Raw(
 			"SELECT id, tenant_id, title, agreement_type, version, valid_from, valid_to,\n"+
 				"        filing_status, filed_at, accepted_at, document_ref,\n"+
-				"        linked_labor_agreement_id, renewal_alert_at, created_by,\n"+ //nolint:misspell // DB column name is schema contract
+				"        linked_labor_agreement_id, renewal_alert_at, govfiling_id, created_by,\n"+ //nolint:misspell // DB column name is schema contract
 				"        created_at, updated_at FROM labor_agreement_documents WHERE id = ? AND tenant_id = ? LIMIT 1", //nolint:misspell // DB table name is schema contract
 			in.ID, in.TenantID,
 		).Scan(&doc).Error; err != nil {
@@ -920,7 +923,7 @@ func (s *Service) ListExpiringAgreements(ctx context.Context, tenantID uuid.UUID
 		return tx.Raw(
 			"SELECT id, tenant_id, title, agreement_type, version, valid_from, valid_to,\n"+
 				"        filing_status, filed_at, accepted_at, document_ref,\n"+
-				"        linked_labor_agreement_id, renewal_alert_at, created_by,\n"+ //nolint:misspell // DB column name is schema contract
+				"        linked_labor_agreement_id, renewal_alert_at, govfiling_id, created_by,\n"+ //nolint:misspell // DB column name is schema contract
 				"        created_at, updated_at FROM labor_agreement_documents\n"+ //nolint:misspell // DB table name is schema contract
 				" WHERE tenant_id = ? AND renewal_alert_at IS NOT NULL AND renewal_alert_at <= ?\n"+
 				" ORDER BY renewal_alert_at",
