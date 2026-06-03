@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/your-org/hr-saas/internal/approval"
+	"github.com/your-org/hr-saas/internal/offer/econtract"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/crypto"
@@ -78,14 +79,19 @@ type Service struct {
 	// nil keeps the package decoupled (the acceptance simply records the
 	// response without generating an employee master).
 	employeeCreator EmployeeCreator
+	// econtractAdapter is the optional INT-009 electronic-contract service
+	// adapter. nil (or stub) keeps the package decoupled until real provider
+	// credentials are configured (Issue #14).
+	econtractAdapter econtract.Adapter
 }
 
 // NewService constructs a Service. The approval engine is built internally so
 // that the RegisterRoutes signature stays uniform across all stories.
 func NewService(tdb *tenantdb.TenantDB) *Service {
 	return &Service{
-		tdb:         tdb,
-		approvalSvc: approval.NewService(tdb),
+		tdb:              tdb,
+		approvalSvc:      approval.NewService(tdb),
+		econtractAdapter: econtract.NewStubAdapter(),
 	}
 }
 
@@ -96,6 +102,191 @@ func (s *Service) WithEmployeeCreator(c EmployeeCreator) *Service {
 	clone := *s
 	clone.employeeCreator = c
 	return &clone
+}
+
+// WithEContractAdapter returns a copy of the service with the INT-009
+// electronic-contract adapter wired in. Used by the central wiring (or tests)
+// to replace the default stub with a real provider adapter.
+func (s *Service) WithEContractAdapter(a econtract.Adapter) *Service {
+	clone := *s
+	clone.econtractAdapter = a
+	return &clone
+}
+
+// ---------------------------------------------------------------------------
+// Electronic-contract service (INT-009 / LM-002)
+// ---------------------------------------------------------------------------
+
+// InitiateSigningInput holds fields for dispatching an offer letter to the
+// electronic-contract service for signature.
+//
+// SECURITY: SignerRef MUST be an opaque identifier — no PII (name / email)
+// should be placed here. Resolve and pass the actual signer contact info to
+// the external service via a separate privileged channel only.
+type InitiateSigningInput struct {
+	TenantID       uuid.UUID
+	ActorID        uuid.UUID
+	LetterID       uuid.UUID
+	IdempotencyKey string
+	IP             *string
+}
+
+// InitiateSigning dispatches the offer letter to the configured
+// electronic-contract service for signature and records the returned envelope
+// reference in offer_letters.esign_envelope_id.
+//
+// Behaviour when the adapter is the stub (no real provider configured):
+// the stub returns a deterministic mock envelope ID. The row is still updated
+// so callers can test the flow end-to-end without real provider credentials.
+//
+// An INT-009 failure (non-nil error from the adapter) does NOT update the DB
+// and is returned directly. A manual signing path (IssueLetter with explicit
+// SignedAt) is always available as a fallback (loosely coupled — CMP-006).
+func (s *Service) InitiateSigning(ctx context.Context, in InitiateSigningInput) (*Letter, error) {
+	// Fetch the letter first to obtain the file_ref and content_hash needed
+	// by the adapter. The fetch is intentionally outside the write transaction
+	// to keep the external API call outside a DB transaction boundary.
+	var letter Letter
+	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		return tx.Raw(
+			`SELECT id, tenant_id, offer_id, file_ref, version, esign_provider,
+			        esign_envelope_id, content_hash, signer_ref, signed_at,
+			        created_at, updated_at
+			 FROM offer_letters
+			 WHERE id = ? AND tenant_id = ? LIMIT 1`,
+			in.LetterID, in.TenantID,
+		).Scan(&letter).Error
+	})
+	if err != nil {
+		return nil, fmt.Errorf("offer: initiate signing read letter: %w", err)
+	}
+	if letter.ID == uuid.Nil {
+		return nil, ErrNotFound
+	}
+
+	// Dispatch to the external service outside the DB transaction.
+	signerRef := ""
+	if letter.SignerRef != nil {
+		signerRef = *letter.SignerRef
+	}
+	result, adapterErr := s.econtractAdapter.SendSignRequest(ctx, econtract.SendSignRequest{
+		TenantID:       in.TenantID,
+		OfferLetterID:  in.LetterID,
+		IdempotencyKey: in.IdempotencyKey,
+		FileRef:        letter.FileRef,
+		ContentHash:    letter.ContentHash,
+		SignerRef:      signerRef,
+	})
+	if adapterErr != nil {
+		return nil, fmt.Errorf("offer: initiate signing adapter: %w", adapterErr)
+	}
+
+	// Persist the envelope reference and provider label.
+	writeErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		res := tx.Exec(
+			`UPDATE offer_letters
+			 SET    esign_provider    = ?,
+			        esign_envelope_id = ?,
+			        updated_at        = now()
+			 WHERE  id = ? AND tenant_id = ?`,
+			result.Provider, result.EnvelopeID, in.LetterID, in.TenantID,
+		)
+		if res.Error != nil {
+			return fmt.Errorf("offer: initiate signing update: %w", res.Error)
+		}
+
+		idStr := in.LetterID.String()
+		return audit.Record(tx, audit.Entry{
+			TenantID:     in.TenantID,
+			UserID:       &in.ActorID,
+			Action:       "offer_letter.esign_initiated",
+			ResourceType: "offer_letter",
+			ResourceID:   &idStr,
+			IP:           in.IP,
+		})
+	})
+	if writeErr != nil {
+		return nil, writeErr
+	}
+
+	letter.EsignProvider = result.Provider
+	letter.EsignEnvelopeID = result.EnvelopeID
+	return &letter, nil
+}
+
+// PollSigningStatusInput holds parameters for polling the current signing
+// status from the external provider.
+type PollSigningStatusInput struct {
+	TenantID uuid.UUID
+	ActorID  uuid.UUID
+	LetterID uuid.UUID
+	IP       *string
+}
+
+// PollSigningStatus retrieves the current signing status from the configured
+// electronic-contract service adapter and, when the status is completed,
+// records signed_at on the offer_letters row.
+//
+// Behaviour when the adapter is the stub: the stub returns completed for
+// STUB-prefixed envelope IDs so the flow can be tested end-to-end.
+func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInput) (*Letter, econtract.SignStatus, error) {
+	var letter Letter
+	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		return tx.Raw(
+			`SELECT id, tenant_id, offer_id, file_ref, version, esign_provider,
+			        esign_envelope_id, content_hash, signer_ref, signed_at,
+			        created_at, updated_at
+			 FROM offer_letters
+			 WHERE id = ? AND tenant_id = ? LIMIT 1`,
+			in.LetterID, in.TenantID,
+		).Scan(&letter).Error
+	})
+	if err != nil {
+		return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status read letter: %w", err)
+	}
+	if letter.ID == uuid.Nil {
+		return nil, econtract.SignStatus{}, ErrNotFound
+	}
+	if letter.EsignEnvelopeID == "" {
+		return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status: no esign_envelope_id on letter")
+	}
+
+	status, adapterErr := s.econtractAdapter.GetSignStatus(ctx, letter.EsignEnvelopeID)
+	if adapterErr != nil {
+		return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status adapter: %w", adapterErr)
+	}
+
+	// When completed, persist signed_at and record an audit entry.
+	if status.Status == econtract.SignStatusCompleted && letter.SignedAt == nil && status.SignedAt != nil {
+		writeErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+			res := tx.Exec(
+				`UPDATE offer_letters
+				 SET    signed_at  = ?,
+				        updated_at = now()
+				 WHERE  id = ? AND tenant_id = ? AND signed_at IS NULL`,
+				status.SignedAt, in.LetterID, in.TenantID,
+			)
+			if res.Error != nil {
+				return fmt.Errorf("offer: poll signing status update: %w", res.Error)
+			}
+
+			idStr := in.LetterID.String()
+			return audit.Record(tx, audit.Entry{
+				TenantID:     in.TenantID,
+				UserID:       &in.ActorID,
+				Action:       "offer_letter.esign_completed",
+				ResourceType: "offer_letter",
+				ResourceID:   &idStr,
+				IP:           in.IP,
+			})
+		})
+		if writeErr != nil {
+			return nil, econtract.SignStatus{}, writeErr
+		}
+		letter.SignedAt = status.SignedAt
+	}
+
+	return &letter, status, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -539,6 +539,66 @@ func (h *Handler) IssueLetter(c *gin.Context) {
 	c.JSON(http.StatusCreated, toLetterResponse(letter))
 }
 
+// InitiateSigning handles POST /offers/:id/letters/:lid/sign.
+// Dispatches the offer letter to the configured electronic-contract service.
+func (h *Handler) InitiateSigning(c *gin.Context) {
+	tenantID := platformauth.TenantIDFrom(c)
+	actorID := platformauth.UserIDFrom(c)
+
+	letterID, err := uuid.Parse(c.Param("lid"))
+	if err != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_ID", "invalid letter id")
+		return
+	}
+
+	// Derive idempotency key from letter ID + actor + request-time nonce.
+	// Using a stable key prevents duplicate external submissions on retry.
+	idempotencyKey := letterID.String() + ":" + actorID.String()
+
+	letter, err := h.svc.InitiateSigning(c.Request.Context(), InitiateSigningInput{
+		TenantID:       tenantID,
+		ActorID:        actorID,
+		LetterID:       letterID,
+		IdempotencyKey: idempotencyKey,
+		IP:             clientIP(c),
+	})
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, toLetterResponse(letter))
+}
+
+// PollSigningStatus handles GET /offers/:id/letters/:lid/sign.
+// Retrieves the current signing status from the external provider.
+func (h *Handler) PollSigningStatus(c *gin.Context) {
+	tenantID := platformauth.TenantIDFrom(c)
+	actorID := platformauth.UserIDFrom(c)
+
+	letterID, err := uuid.Parse(c.Param("lid"))
+	if err != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_ID", "invalid letter id")
+		return
+	}
+
+	letter, status, err := h.svc.PollSigningStatus(c.Request.Context(), PollSigningStatusInput{
+		TenantID: tenantID,
+		ActorID:  actorID,
+		LetterID: letterID,
+		IP:       clientIP(c),
+	})
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"letter": toLetterResponse(letter),
+		"sign_status": gin.H{
+			"envelope_id": status.EnvelopeID,
+			"status":      status.Status,
+			"provider":    status.Provider,
+		},
+	})
+}
+
 // ListLetters handles GET /offers/:id/letters.
 func (h *Handler) ListLetters(c *gin.Context) {
 	tenantID := platformauth.TenantIDFrom(c)

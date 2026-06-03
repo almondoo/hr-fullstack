@@ -17,19 +17,21 @@ import (
 //
 // Endpoints:
 //
-//	GET    /offers/settings                  — offer:read
-//	PUT    /offers/settings                  — offer:write
-//	POST   /offers                           — offer:write
-//	GET    /offers                           — offer:read
-//	GET    /offers/:id                       — offer:read           (salary masked)
-//	GET    /offers/:id/sensitive             — offer:read_sensitive (salary decrypted)
-//	POST   /offers/:id/submit-approval       — offer:write
-//	POST   /offers/:id/send                  — offer:write
-//	POST   /offers/:id/rescind               — offer:write
-//	POST   /offers/:id/letters               — offer:write
-//	GET    /offers/:id/letters               — offer:read
-//	POST   /offers/:id/respond               — offer:write
-//	GET    /offers/:id/responses             — offer:read
+//	GET    /offers/settings                        — offer:read
+//	PUT    /offers/settings                        — offer:write
+//	POST   /offers                                 — offer:write
+//	GET    /offers                                 — offer:read
+//	GET    /offers/:id                             — offer:read           (salary masked)
+//	GET    /offers/:id/sensitive                   — offer:read_sensitive (salary decrypted)
+//	POST   /offers/:id/submit-approval             — offer:write
+//	POST   /offers/:id/send                        — offer:write
+//	POST   /offers/:id/rescind                     — offer:write
+//	POST   /offers/:id/letters                     — offer:write
+//	GET    /offers/:id/letters                     — offer:read
+//	POST   /offers/:id/letters/:lid/sign           — offer:write (INT-009 sign dispatch)
+//	GET    /offers/:id/letters/:lid/sign           — offer:read  (INT-009 status poll)
+//	POST   /offers/:id/respond                     — offer:write
+//	GET    /offers/:id/responses                   — offer:read
 func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin.HandlerFunc) {
 	svc := NewService(tdb)
 	h := NewHandler(svc)
@@ -57,6 +59,11 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 	// Offer letters (CMP-006 signing evidence).
 	offers.POST("/:id/letters", offerWrite, h.IssueLetter)
 	offers.GET("/:id/letters", offerRead, h.ListLetters)
+
+	// Electronic-contract signing (INT-009 / LM-002).
+	// :lid is the offer_letters.id (UUID).
+	offers.POST("/:id/letters/:lid/sign", offerWrite, h.InitiateSigning)
+	offers.GET("/:id/letters/:lid/sign", offerRead, h.PollSigningStatus)
 
 	// Candidate responses (ST-ATS-06 trigger on acceptance).
 	offers.POST("/:id/respond", offerWrite, h.Respond)
