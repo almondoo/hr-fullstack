@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/your-org/hr-saas/internal/approval"
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
@@ -893,6 +894,28 @@ func (s *Service) UpdateRequestStatus(ctx context.Context, in UpdateRequestStatu
 			IP:           in.IP,
 		}); err != nil {
 			return fmt.Errorf("leave: update status audit: %w", err)
+		}
+
+		// Outbox hook: notify the actor (HR/approver) about the leave status change.
+		// The actor is the user performing the status update (approval decision, etc.).
+		outboxEventType := "leave.status_updated"
+		switch in.Status {
+		case RequestStatusApproved:
+			outboxEventType = "leave.approved"
+		case RequestStatusRejected:
+			outboxEventType = "leave.rejected"
+		case RequestStatusCancelled:
+			outboxEventType = "leave.cancelled"
+		}
+		if err := notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       outboxEventType,
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: in.ActorID,
+			ResourceType:    "leave_request",
+			ResourceID:      &in.ID,
+		}); err != nil {
+			return fmt.Errorf("leave: update status outbox: %w", err)
 		}
 		return nil
 	})

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
@@ -279,13 +280,27 @@ func (s *Service) ConvertApplicant(ctx context.Context, in ConvertApplicantInput
 
 		// Audit: opaque IDs only — never name/email/contact PII.
 		idStr := link.ID.String()
-		return audit.Record(tx, audit.Entry{
+		if err := audit.Record(tx, audit.Entry{
 			TenantID:     in.TenantID,
 			UserID:       &in.ActorID,
 			Action:       "hiring.applicant_converted",
 			ResourceType: "applicant_employee_link",
 			ResourceID:   &idStr,
 			IP:           in.IP,
+		}); err != nil {
+			return err
+		}
+
+		// Outbox hook: notify the HR actor that an applicant was converted to employee.
+		// The employee is 'inactive' (pre-start); no employee user ID exists yet.
+		// Notify the actor (HR person who performed the conversion).
+		return notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       "hiring.applicant_converted",
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: in.ActorID,
+			ResourceType:    "applicant_employee_link",
+			ResourceID:      &link.ID,
 		})
 	})
 	if err != nil {

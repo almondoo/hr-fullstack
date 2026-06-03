@@ -29,8 +29,14 @@ import (
 // Note: the sensitive document-content route lives under a distinct
 // /govfiling-documents prefix (not /govfilings/...) to avoid a gin
 // router param/literal conflict with the /govfilings/:id routes.
-func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin.HandlerFunc) {
+// RegisterRoutes is defined above (see package-level doc comment).
+// An optional MynumberProvider enables 個人番号 provision for social-insurance
+// filings; pass nil (or omit) to disable.
+func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin.HandlerFunc, mnProvider ...MynumberProvider) {
 	svc := NewService(tdb)
+	if len(mnProvider) > 0 && mnProvider[0] != nil {
+		svc = svc.WithMynumberProvider(mnProvider[0])
+	}
 	h := NewHandler(svc)
 
 	filingRead := platformauth.RequirePermission(tdb, "filing:read")

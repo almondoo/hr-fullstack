@@ -292,7 +292,10 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		jobposting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		goal.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		reporting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
-		govfiling.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		// Wire the mynumber provider adapter so govfiling can provide 個人番号
+		// for social-insurance filings (利用提供ログ付き).
+		mnSvc := mynumber.NewService(deps.TenantDB)
+		govfiling.RegisterRoutes(v1, deps.TenantDB, requireAuth, NewMynumberProviderAdapter(mnSvc))
 		ledger.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		billing.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		selfservice.RegisterRoutes(v1, deps.TenantDB, requireAuth)

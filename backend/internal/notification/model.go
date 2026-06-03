@@ -142,3 +142,38 @@ type Preference struct {
 
 // TableName maps Preference to notification_preferences.
 func (Preference) TableName() string { return "notification_preferences" }
+
+// OutboxEntry is the GORM model for notification_outbox.
+//
+// Domains INSERT rows here atomically within their own transactions (outbox
+// pattern).  The notification service polls pending rows and calls Publish.
+//
+// Security: BodyRef and ResourceID are opaque references.  PII (マイナンバー
+// /口座/健診 etc.) MUST NOT appear here.
+type OutboxEntry struct {
+	ID              uuid.UUID  `gorm:"column:id;primaryKey"`
+	TenantID        uuid.UUID  `gorm:"column:tenant_id"`
+	EventType       string     `gorm:"column:event_type"`
+	ActorUserID     *uuid.UUID `gorm:"column:actor_user_id"`
+	RecipientUserID uuid.UUID  `gorm:"column:recipient_user_id"`
+	ResourceType    string     `gorm:"column:resource_type"`
+	ResourceID      *uuid.UUID `gorm:"column:resource_id"`
+	BodyRef         string     `gorm:"column:body_ref"`
+	DedupeKey       *string    `gorm:"column:dedupe_key"`
+	Status          string     `gorm:"column:status"`
+	Attempts        int        `gorm:"column:attempts"`
+	LastError       string     `gorm:"column:last_error"`
+	ProcessedAt     *time.Time `gorm:"column:processed_at"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+}
+
+// TableName maps OutboxEntry to notification_outbox.
+func (OutboxEntry) TableName() string { return "notification_outbox" }
+
+// Outbox status constants.
+const (
+	OutboxStatusPending   = "pending"
+	OutboxStatusProcessed = "processed"
+	OutboxStatusFailed    = "failed"
+)

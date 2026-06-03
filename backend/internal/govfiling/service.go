@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/crypto"
@@ -73,11 +74,19 @@ func isFilingTransitionAllowed(current, next string) bool {
 //
 // IdempotencyKey は外部API二重送信防止に使用する。PayloadJSON は参照IDのみで構成し、
 // マイナンバー等の復号値を含めてはならない。
+//
+// NumberPlaintext は社保届出に必要な 個人番号 の平文 (transient)。
+// Submitter 実装はこの値を永続化・ログ記録してはならない。外部 API 呼出後は即座に廃棄する。
+// 値が不要な申請種別 / mock 実装では nil を渡す。
 type SubmitRequest struct {
 	Channel        string
 	FilingType     string
 	IdempotencyKey string
 	PayloadJSON    []byte
+	// NumberPlaintext is the decrypted 個人番号, transient.
+	// SECURITY: MUST NOT be persisted, logged, or included in error messages.
+	// Implementations must discard it immediately after the external API call returns.
+	NumberPlaintext []byte
 }
 
 // SubmitResult is the result returned by a Submitter.
@@ -108,16 +117,54 @@ func (mockSubmitter) Submit(_ context.Context, req SubmitRequest) (SubmitResult,
 }
 
 // ---------------------------------------------------------------------------
+// MynumberProvider — マイナンバー提供の抽象化 (疎結合・DI)
+// ---------------------------------------------------------------------------
+
+// MynumberProvideInput holds the parameters for a single 個人番号 provision request.
+//
+// The 個人番号 is accessed via the mynumber store; govfiling never stores nor
+// logs the plaintext value.  The result (plaintext bytes) must be used transiently
+// and never persisted in any column, log, audit record, or error message.
+//
+// Purpose must be one of the enumerated values from the mynumber domain
+// (e.g. "social_insurance").
+type MynumberProvideInput struct {
+	TenantID   uuid.UUID
+	ActorID    uuid.UUID
+	RecordID   uuid.UUID
+	Purpose    string
+	ProvidedTo string
+	IP         *string
+}
+
+// MynumberProvider abstracts access to the マイナンバー domain for third-party
+// provision (社保手続き等).  govfiling defines this interface to avoid a direct
+// import of the mynumber package (dependency inversion).
+//
+// The returned bytes are the plaintext 個人番号.  The caller is responsible for
+// using the value transiently (hand-off to the Submitter) and never persisting
+// or logging it.  A nil provider means no mynumber integration is configured
+// (the filing proceeds without including the number).
+type MynumberProvider interface {
+	// Provide decrypts and returns a 個人番号 for handing off to an external
+	// process, with a "provide" access-log entry recorded atomically.
+	Provide(ctx context.Context, in MynumberProvideInput) ([]byte, error)
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
 // Service provides business logic for the govfiling domain.
 type Service struct {
-	tdb       *tenantdb.TenantDB
-	submitter Submitter
+	tdb              *tenantdb.TenantDB
+	submitter        Submitter
+	mynumberProvider MynumberProvider
 }
 
-// NewService constructs a Service using the MVP mock submitter.
+// NewService constructs a Service using the MVP mock submitter and no
+// mynumber provider (number provision is skipped unless WithMynumberProvider
+// is called).
 func NewService(tdb *tenantdb.TenantDB) *Service {
 	return &Service{tdb: tdb, submitter: mockSubmitter{}}
 }
@@ -125,7 +172,14 @@ func NewService(tdb *tenantdb.TenantDB) *Service {
 // WithSubmitter returns a copy of the Service using the given Submitter.
 // Used by tests and (future) production wiring to swap the e-Gov/マイナポータル adapter.
 func (s *Service) WithSubmitter(sub Submitter) *Service {
-	return &Service{tdb: s.tdb, submitter: sub}
+	return &Service{tdb: s.tdb, submitter: sub, mynumberProvider: s.mynumberProvider}
+}
+
+// WithMynumberProvider returns a copy of the Service using the given
+// MynumberProvider.  Used by production wiring to inject the mynumber.Service
+// adapter for social-insurance filings that require a 個人番号.
+func (s *Service) WithMynumberProvider(p MynumberProvider) *Service {
+	return &Service{tdb: s.tdb, submitter: s.submitter, mynumberProvider: p}
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +513,15 @@ type SubmitFilingInput struct {
 	TenantID uuid.UUID
 	ActorID  uuid.UUID
 	ID       uuid.UUID
-	IP       *string
+	// MynumberRecordID identifies the mynumber_records row for the employee in
+	// this filing.  When set and a MynumberProvider is configured on the Service,
+	// Provide is called with Purpose=social_insurance before the external submit,
+	// and the decrypted number is passed transiently to the Submitter.  The
+	// plaintext value is NEVER persisted, logged, or written to any audit record
+	// — it is used only for the in-memory SubmitRequest and discarded after.
+	// When nil or no provider is configured, the filing proceeds without a number.
+	MynumberRecordID *uuid.UUID
+	IP               *string
 }
 
 // SubmitFiling sends a filing to the external channel via the configured
@@ -468,6 +530,12 @@ type SubmitFilingInput struct {
 // Idempotency: the external call is keyed by the filing's idempotency_key, so a
 // re-submit with the same key never causes a duplicate external registration.
 // The row is locked FOR UPDATE to avoid concurrent double-submission (TOCTOU).
+//
+// マイナンバー提供: when SubmitFilingInput.MynumberRecordID is set and a
+// MynumberProvider is configured, the 個人番号 is retrieved via Provide (which
+// records a "provide" access-log entry atomically).  The plaintext is passed
+// transiently to the Submitter and is never stored in the DB, logged, or written
+// to any audit row.
 func (s *Service) SubmitFiling(ctx context.Context, in SubmitFilingInput) (*Filing, error) {
 	var f Filing
 	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
@@ -486,14 +554,48 @@ func (s *Service) SubmitFiling(ctx context.Context, in SubmitFilingInput) (*Fili
 		}
 		fromStatus := f.Status
 
+		// Retrieve the 個人番号 when a record ID and provider are configured.
+		// The plaintext is TRANSIENT — used only in SubmitRequest.NumberPlaintext
+		// and never persisted or logged.  The Provide call records the access-log
+		// entry (利用提供ログ) atomically in the mynumber store.
+		//
+		// SECURITY: The value is held in a local variable and discarded after the
+		// external submit returns.  It must not appear in any error string, log
+		// entry, audit row, or external reference.
+		var numberPlaintext []byte
+		if in.MynumberRecordID != nil && s.mynumberProvider != nil {
+			plain, err := s.mynumberProvider.Provide(ctx, MynumberProvideInput{
+				TenantID:   in.TenantID,
+				ActorID:    in.ActorID,
+				RecordID:   *in.MynumberRecordID,
+				Purpose:    "social_insurance",
+				ProvidedTo: "govfiling:submit:" + in.ID.String(),
+				IP:         in.IP,
+			})
+			if err != nil {
+				return fmt.Errorf("govfiling: submit filing provide mynumber: %w", err)
+			}
+			numberPlaintext = plain
+		}
+
 		// Call the external channel (idempotent via idempotency_key).
-		// 機微情報の非格納: PayloadJSON は参照IDのみ。
+		// PayloadJSON contains reference IDs only (機微情報非格納).
+		// NumberPlaintext is the transient 個人番号; Submitter must not persist it.
+		// After Submit returns, zero the buffer so the value cannot be read from
+		// stack / heap by a later operation.
 		result, subErr := s.submitter.Submit(ctx, SubmitRequest{
-			Channel:        f.Channel,
-			FilingType:     f.FilingType,
-			IdempotencyKey: f.IdempotencyKey,
-			PayloadJSON:    f.PayloadJSON,
+			Channel:         f.Channel,
+			FilingType:      f.FilingType,
+			IdempotencyKey:  f.IdempotencyKey,
+			PayloadJSON:     f.PayloadJSON,
+			NumberPlaintext: numberPlaintext,
 		})
+		// Zero the plaintext buffer immediately after the external call to prevent
+		// the value from surviving in heap memory longer than necessary.
+		for i := range numberPlaintext {
+			numberPlaintext[i] = 0
+		}
+		numberPlaintext = nil
 		if subErr != nil {
 			// On submit failure: hold the error and move to 'error' state so it
 			// can be retried (再送)。
@@ -536,6 +638,18 @@ func (s *Service) SubmitFiling(ctx context.Context, in SubmitFilingInput) (*Fili
 			IP:           in.IP,
 		}); err != nil {
 			return err
+		}
+
+		// Outbox hook: notify the actor that their gov filing was submitted.
+		if err := notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       "govfiling.submitted",
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: in.ActorID,
+			ResourceType:    "gov_filing",
+			ResourceID:      &in.ID,
+		}); err != nil {
+			return fmt.Errorf("govfiling: submit outbox: %w", err)
 		}
 
 		return tx.Raw(

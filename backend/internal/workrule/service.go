@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
@@ -466,13 +467,25 @@ func (s *Service) PublishVersion(ctx context.Context, in PublishVersionInput) (*
 		}
 
 		idStr := in.VersionID.String()
-		return audit.Record(tx, audit.Entry{
+		if err := audit.Record(tx, audit.Entry{
 			TenantID:     in.TenantID,
 			UserID:       &in.ActorID,
 			Action:       "work_rule_version.published",
 			ResourceType: "work_rule_version",
 			ResourceID:   &idStr,
 			IP:           in.IP,
+		}); err != nil {
+			return err
+		}
+
+		// Outbox hook: notify the actor that the work rule version was published.
+		return notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       "workrule.published",
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: in.ActorID,
+			ResourceType:    "work_rule_version",
+			ResourceID:      &in.VersionID,
 		})
 	})
 	if err != nil {

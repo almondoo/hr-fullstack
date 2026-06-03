@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
@@ -985,13 +986,32 @@ func (s *Service) PayInvoice(ctx context.Context, in PayInvoiceInput) (*PaymentA
 		}
 
 		idStr := attempt.ID.String()
-		return audit.Record(tx, audit.Entry{
+		if err := audit.Record(tx, audit.Entry{
 			TenantID:     in.TenantID,
 			UserID:       &in.ActorID,
 			Action:       "payment.attempted",
 			ResourceType: "payment_attempt",
 			ResourceID:   &idStr,
 			IP:           in.IP,
+		}); err != nil {
+			return err
+		}
+
+		// Outbox hook: notify the billing actor about the payment outcome.
+		outboxEventType := "billing.payment_pending"
+		switch attempt.Status {
+		case PaymentSucceeded:
+			outboxEventType = "billing.payment_succeeded"
+		case PaymentFailed:
+			outboxEventType = "billing.payment_failed"
+		}
+		return notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       outboxEventType,
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: in.ActorID,
+			ResourceType:    "payment_attempt",
+			ResourceID:      &attempt.ID,
 		})
 	})
 	if err != nil {
