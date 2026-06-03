@@ -1,7 +1,16 @@
-// Package testdb provides a test harness that spins up a real PostgreSQL 17
-// container via testcontainers-go, runs the embedded goose migrations, creates
-// the hr_app role, and returns GORM connections for both the admin and
-// application roles.
+// Package testdb provides a test harness backed by a real PostgreSQL 17
+// container via testcontainers-go.  The container is started exactly once per
+// test-binary execution (i.e. once per package under `go test`).  Subsequent
+// calls to NewHarness within the same binary reuse the shared container and
+// connections, paying only the cost of a TRUNCATE between tests.
+//
+// Combined with `-p 1` (sequential package execution) this guarantees that at
+// most one container exists at any moment, eliminating the Docker-overload
+// problem caused by the previous per-call container model.
+//
+// Data isolation between tests is achieved by TRUNCATE … CASCADE executed by
+// TruncateTables.  Each NewHarness call registers a t.Cleanup that truncates
+// all application tables so the next test starts with an empty database.
 //
 // Tests that use this package require Docker to be running.  They are guarded
 // with t.Skip when testing.Short() is true, so `-short` runs skip them.
@@ -24,6 +33,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -46,7 +56,74 @@ const (
 	testAppPass = "hr_app_test_only_not_production"
 )
 
+// allAppTables lists every application table in dependency order (children
+// before parents) so that TRUNCATE … CASCADE works in a single pass.
+// The goose_db_version table is intentionally excluded.
+var allAppTables = []string{
+	"leave_usages",
+	"leave_requests",
+	"leave_grants",
+	"leave_settings",
+	"attendance_records",
+	"payroll_items",
+	"payroll_runs",
+	"approval_steps",
+	"approval_requests",
+	"approval_routes",
+	"offer_letters",
+	"interview_feedbacks",
+	"interview_schedules",
+	"job_applications",
+	"job_postings",
+	"applicants",
+	"selections",
+	"hirings",
+	"onboardings",
+	"talent_profiles",
+	"goal_progress",
+	"goals",
+	"evaluation_results",
+	"evaluations",
+	"one_on_ones",
+	"notification_preferences",
+	"notifications",
+	"ledger_entries",
+	"self_service_requests",
+	"gov_filing_records",
+	"work_rules",
+	"billing_subscriptions",
+	"billing_plans",
+	"mynumber_records",
+	"reporting_snapshots",
+	"audit_logs",
+	"sessions",
+	"employment_contracts",
+	"employee_assignments",
+	"employees",
+	"users",
+	"roles",
+	"departments",
+	"tenants",
+}
+
+// sharedState holds the single container and connections that are shared across
+// all NewHarness calls within one test binary.
+type sharedState struct {
+	adminGORM *gorm.DB
+	appGORM   *gorm.DB
+	adminSQL  *sql.DB
+	appSQL    *sql.DB
+}
+
+var (
+	once      sync.Once
+	shared    *sharedState
+	sharedErr error
+)
+
 // Harness holds the live database connections for an integration test.
+// All Harness values within one test binary point at the same underlying
+// container; isolation is enforced by TruncateTables at cleanup time.
 type Harness struct {
 	// AdminDB is connected as the admin role (postgres).
 	// Use it for setup/teardown tasks that require DDL privileges.
@@ -56,16 +133,15 @@ type Harness struct {
 	// All tenant-scoped business queries must go through this connection.
 	AppDB *gorm.DB
 
-	t         *testing.T
-	container *tcpostgres.PostgresContainer
-	adminSQL  *sql.DB
-	appSQL    *sql.DB
+	t *testing.T
 }
 
-// NewHarness starts a postgres:17-alpine container, runs migrations, creates
-// hr_app, and returns a fully initialised Harness.
-// The container and both connections are automatically cleaned up when the
-// test completes via t.Cleanup.
+// NewHarness returns a Harness backed by the package-level shared container.
+// The first call within a test binary starts the container and runs migrations;
+// all subsequent calls reuse that container.
+//
+// A t.Cleanup is registered that truncates all application tables when the
+// test completes, leaving the database empty for the next test.
 func NewHarness(t *testing.T) *Harness {
 	t.Helper()
 
@@ -73,120 +149,21 @@ func NewHarness(t *testing.T) *Harness {
 		t.Skip("testdb: skipping integration test (requires Docker; use -short to confirm)")
 	}
 
-	ctx := context.Background()
-
-	container, err := tcpostgres.Run(ctx,
-		"postgres:17-alpine",
-		tcpostgres.WithDatabase(testDBName),
-		tcpostgres.WithUsername(testAdminUser),
-		tcpostgres.WithPassword(testAdminPass),
-		tcpostgres.WithSQLDriver("pgx"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("testdb: start postgres container: %v", err)
-	}
-
-	adminDSN, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: get connection string: %v", err)
-	}
-
-	// --- Run migrations as admin ---
-	adminSQLDB, err := sql.Open("pgx", adminDSN)
-	if err != nil {
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: open admin sql.DB: %v", err)
-	}
-
-	goose.SetBaseFS(migrations.FS)
-	goose.SetLogger(goose.NopLogger())
-	if err := goose.SetDialect("postgres"); err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: goose set dialect: %v", err)
-	}
-
-	// Migrations include GRANT ... TO hr_app, so hr_app must exist first.
-	if err := createAppRole(ctx, adminSQLDB); err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: create hr_app role: %v", err)
-	}
-
-	if err := goose.Up(adminSQLDB, "migrations"); err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: goose up: %v", err)
-	}
-
-	// --- Open GORM connections ---
-	silentLogger := gormlogger.Default.LogMode(gormlogger.Silent)
-	if os.Getenv("TEST_DB_DEBUG") != "" {
-		silentLogger = gormlogger.Default.LogMode(gormlogger.Info)
-	}
-
-	adminGORM, err := gorm.Open(postgres.Open(adminDSN), &gorm.Config{
-		Logger:                 silentLogger,
-		SkipDefaultTransaction: true,
+	once.Do(func() {
+		shared, sharedErr = initShared()
 	})
-	if err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: open admin GORM: %v", err)
+	if sharedErr != nil {
+		t.Fatalf("testdb: shared container initialisation failed: %v", sharedErr)
 	}
-
-	// Build an hr_app DSN by swapping user/password in the admin DSN.
-	// testcontainers returns a host:port DSN; we reconstruct it cleanly.
-	host, err := container.Host(ctx)
-	if err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: get container host: %v", err)
-	}
-	mappedPort, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: get mapped port: %v", err)
-	}
-	appDSN := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		host, mappedPort.Port(), testAppUser, testAppPass, testDBName,
-	)
-
-	appSQLDB, err := sql.Open("pgx", appDSN)
-	if err != nil {
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: open app sql.DB: %v", err)
-	}
-
-	appGORM, err := gorm.Open(postgres.Open(appDSN), &gorm.Config{
-		Logger:                 silentLogger,
-		SkipDefaultTransaction: true,
-	})
-	if err != nil {
-		_ = appSQLDB.Close()
-		_ = adminSQLDB.Close()
-		_ = container.Terminate(ctx)
-		t.Fatalf("testdb: open app GORM: %v", err)
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	_ = logger // available for future use
 
 	h := &Harness{
-		AdminDB:   adminGORM,
-		AppDB:     appGORM,
-		t:         t,
-		container: container,
-		adminSQL:  adminSQLDB,
-		appSQL:    appSQLDB,
+		AdminDB: shared.adminGORM,
+		AppDB:   shared.appGORM,
+		t:       t,
 	}
 
-	t.Cleanup(h.cleanup)
+	// Truncate after each test so the next test starts with an empty DB.
+	t.Cleanup(h.truncateAll)
 
 	return h
 }
@@ -213,12 +190,162 @@ func (h *Harness) TruncateTables(tables ...string) {
 	}
 }
 
-// cleanup tears down the container and closes connections.
-func (h *Harness) cleanup() {
+// truncateAll is the t.Cleanup handler: truncates every application table.
+//
+// PostgreSQL aborts the entire transaction when any statement within it fails,
+// including DDL statements that use IF EXISTS.  To avoid that, we issue each
+// TRUNCATE as an independent autocommit statement so a missing table only
+// silently skips that one statement rather than rolling back the whole batch.
+func (h *Harness) truncateAll() {
+	sqlDB, err := h.AdminDB.DB()
+	if err != nil {
+		h.t.Logf("testdb: cleanup truncate get sql.DB: %v", err)
+		return
+	}
+
+	for _, tbl := range allAppTables {
+		// Each statement is independent (autocommit).  A missing table produces
+		// no error because of IF EXISTS; we discard the error anyway.
+		_, _ = sqlDB.Exec("TRUNCATE TABLE IF EXISTS " + tbl + " CASCADE")
+	}
+}
+
+// initShared starts the postgres container, runs migrations, and opens both
+// GORM connections.  It is called at most once per test binary via sync.Once.
+func initShared() (*sharedState, error) {
 	ctx := context.Background()
-	_ = h.appSQL.Close()
-	_ = h.adminSQL.Close()
-	_ = h.container.Terminate(ctx)
+
+	container, err := tcpostgres.Run(ctx,
+		"postgres:17-alpine",
+		tcpostgres.WithDatabase(testDBName),
+		tcpostgres.WithUsername(testAdminUser),
+		tcpostgres.WithPassword(testAdminPass),
+		tcpostgres.WithSQLDriver("pgx"),
+		tcpostgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("start postgres container: %w", err)
+	}
+
+	adminDSN, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("get connection string: %w", err)
+	}
+
+	// --- Run migrations as admin ---
+	adminSQLDB, err := sql.Open("pgx", adminDSN)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("open admin sql.DB: %w", err)
+	}
+
+	goose.SetBaseFS(migrations.FS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("postgres"); err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("goose set dialect: %w", err)
+	}
+
+	// Migrations include GRANT ... TO hr_app, so hr_app must exist first.
+	if err := createAppRole(ctx, adminSQLDB); err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("create hr_app role: %w", err)
+	}
+
+	if err := goose.Up(adminSQLDB, "migrations"); err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("goose up: %w", err)
+	}
+
+	// --- Open GORM connections ---
+	silentLogger := gormlogger.Default.LogMode(gormlogger.Silent)
+	if os.Getenv("TEST_DB_DEBUG") != "" {
+		silentLogger = gormlogger.Default.LogMode(gormlogger.Info)
+	}
+
+	adminGORM, err := gorm.Open(postgres.Open(adminDSN), &gorm.Config{
+		Logger:                 silentLogger,
+		SkipDefaultTransaction: true,
+	})
+	if err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("open admin GORM: %w", err)
+	}
+
+	// Set connection pool limits on admin connection.
+	adminSQLConn, err := adminGORM.DB()
+	if err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("get admin sql.DB from GORM: %w", err)
+	}
+	adminSQLConn.SetMaxOpenConns(10)
+	adminSQLConn.SetMaxIdleConns(5)
+
+	// Build an hr_app DSN by swapping user/password in the admin DSN.
+	// testcontainers returns a host:port DSN; we reconstruct it cleanly.
+	host, err := container.Host(ctx)
+	if err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("get container host: %w", err)
+	}
+	mappedPort, err := container.MappedPort(ctx, "5432")
+	if err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("get mapped port: %w", err)
+	}
+	appDSN := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		host, mappedPort.Port(), testAppUser, testAppPass, testDBName,
+	)
+
+	appSQLDB, err := sql.Open("pgx", appDSN)
+	if err != nil {
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("open app sql.DB: %w", err)
+	}
+
+	appGORM, err := gorm.Open(postgres.Open(appDSN), &gorm.Config{
+		Logger:                 silentLogger,
+		SkipDefaultTransaction: true,
+	})
+	if err != nil {
+		_ = appSQLDB.Close()
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("open app GORM: %w", err)
+	}
+
+	// Set connection pool limits on app connection.
+	// numGoroutines=50 in the concurrency test drives the upper bound; 25
+	// open + 10 idle is a comfortable headroom without starving the OS.
+	appSQLConn, err := appGORM.DB()
+	if err != nil {
+		_ = appSQLDB.Close()
+		_ = adminSQLDB.Close()
+		_ = container.Terminate(ctx)
+		return nil, fmt.Errorf("get app sql.DB from GORM: %w", err)
+	}
+	appSQLConn.SetMaxOpenConns(25)
+	appSQLConn.SetMaxIdleConns(10)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	_ = logger // available for future use
+
+	return &sharedState{
+		adminGORM: adminGORM,
+		appGORM:   appGORM,
+		adminSQL:  adminSQLDB,
+		appSQL:    appSQLDB,
+	}, nil
 }
 
 // quoteLiteral returns s wrapped in single quotes with any single-quote and

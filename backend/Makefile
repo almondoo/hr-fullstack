@@ -5,8 +5,10 @@ build:
 	go build ./...
 
 # ── Test (race detector; requires Docker for testcontainers) ──────────────────
+# -p 1 runs packages sequentially, ensuring at most one testcontainers
+# PostgreSQL container exists at a time.  See internal/platform/testdb.
 test:
-	go test ./... -race -timeout 600s -count=1
+	go test ./... -race -timeout 600s -count=1 -p 1
 
 # ── Lint ──────────────────────────────────────────────────────────────────────
 lint:
