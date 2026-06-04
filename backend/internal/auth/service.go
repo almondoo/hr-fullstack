@@ -24,6 +24,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 
 	"github.com/your-org/hr-saas/internal/platform/audit"
@@ -32,6 +35,11 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/httpx"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
+
+// authTracer is the OTel tracer used by the auth service.
+// Spans emitted here use the "auth" instrumentation scope.
+// No PII (email, password, token) is recorded in span attributes.
+var authTracer = otel.Tracer("github.com/your-org/hr-saas/internal/auth")
 
 // ---------------------------------------------------------------------------
 // Model shapes (GORM, mapped to DB columns)
@@ -164,6 +172,10 @@ func (r *SignupRequest) validate() error {
 
 // Signup creates a new tenant, admin role, and admin user, then issues a session.
 func (s *Service) Signup(c *gin.Context) {
+	ctx, span := authTracer.Start(c.Request.Context(), "auth.Signup")
+	defer span.End()
+	c.Request = c.Request.WithContext(ctx)
+
 	var req SignupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", "invalid JSON")
@@ -257,9 +269,11 @@ func (s *Service) Signup(c *gin.Context) {
 	}); err != nil {
 		// Slug unique violation from another concurrent request.
 		if isUniqueViolation(err) {
+			span.SetStatus(codes.Error, "slug_taken")
 			httpx.RespondError(c, http.StatusConflict, "SLUG_TAKEN", "slug is already in use")
 			return
 		}
+		span.SetStatus(codes.Error, "db_error")
 		httpx.RespondInternalError(c)
 		return
 	}
@@ -312,6 +326,10 @@ const loginErrMsg = "invalid credentials"
 
 // Login authenticates a user by slug+email+password and issues a session.
 func (s *Service) Login(c *gin.Context) {
+	ctx, span := authTracer.Start(c.Request.Context(), "auth.Login")
+	defer span.End()
+	c.Request = c.Request.WithContext(ctx)
+
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", "invalid JSON")
@@ -470,13 +488,19 @@ func (s *Service) Login(c *gin.Context) {
 	})
 
 	if txErr != nil {
+		span.SetStatus(codes.Error, "db_error")
 		httpx.RespondInternalError(c)
 		return
 	}
 	if !loginOK {
+		// Record that auth failed without revealing whether the slug or password
+		// was wrong — no user-enumeration info in the span attribute.
+		span.SetAttributes(attribute.Bool("auth.success", false))
+		span.SetStatus(codes.Error, "invalid_credentials")
 		httpx.RespondError(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", loginErrMsg)
 		return
 	}
+	span.SetAttributes(attribute.Bool("auth.success", true))
 
 	// Issue session.
 	ip := parseClientIP(c)

@@ -1,0 +1,32 @@
+# ===========================================================================
+# systemd timer unit — hr-retention
+# ===========================================================================
+# PURPOSE:
+#   Fires hr-retention.service daily at 02:00 local time.
+#   Pair with retention-timer.service.
+#
+# STATUS:
+#   EXAMPLE ONLY — real deployment wiring depends on #9 (デプロイ先決定).
+#   Adjust OnCalendar and AccuracySec for your operational requirements.
+# ===========================================================================
+[Unit]
+Description=HR SaaS — data retention job timer (daily at 02:00)
+Requires=hr-retention.service
+
+[Timer]
+# Fire daily at 02:00 local system time.
+# Use UTC suffix (e.g. *-*-* 02:00:00 UTC) to pin to UTC regardless of host TZ.
+OnCalendar=*-*-* 02:00:00
+
+# Allow the job to start within a random 5-minute window after the scheduled
+# time to spread load if multiple hosts run this timer (e.g. in an HA setup).
+RandomizedDelaySec=5min
+
+# If the system was off when the timer would have fired, run immediately on
+# next start (useful for low-power hosts that may be powered down at night).
+Persistent=true
+
+Unit=hr-retention.service
+
+[Install]
+WantedBy=timers.target

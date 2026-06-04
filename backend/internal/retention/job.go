@@ -319,21 +319,28 @@ func (r *Runner) RunLedgerRetention(ctx context.Context, tenantID uuid.UUID) err
 
 // doLedgerRetention marks ledger records as retention-expired.
 //
-// Current schema does not have a dedicated `retention_expired` boolean column.
-// The job records an audit event for each record whose retention_until has
-// passed and logs a count.  Schema evolution (e.g. adding a retention_expired
-// column via migration) is a follow-up.
+// For each of the three ledger tables (worker_rosters, wage_ledgers,
+// attendance_books) the job:
+//  1. Fetches rows where retention_until < now() AND retention_expired = false
+//     (idempotent: already-expired rows are not reprocessed).
+//  2. Sets retention_expired = true in a single UPDATE within a tenant-scoped
+//     transaction (migration 00035 adds the column).
+//  3. Writes a tamper-evident audit entry via audit.Record.
 //
-// IDEMPOTENCY: the query is bounded by retention_until < now().  Re-running
-// does not double-count because we only INSERT an audit entry once per
-// record (the audit table tracks actions, not state).
+// Physical deletion is NOT performed — 真実性 (電子帳簿保存法) requires the
+// records to remain readable; only the logical expiry flag is set.
+//
+// IDEMPOTENCY: the query filters on retention_expired = false so that
+// re-running the job after a partial failure does not re-audit already-expired
+// rows.  Each (id, table) pair is processed at most once per row lifetime.
 func (r *Runner) doLedgerRetention(ctx context.Context, tenantID uuid.UUID) (affected, skipped int, _ error) {
 	type expiredRow struct {
 		ID    uuid.UUID `gorm:"column:id"`
 		Table string
 	}
 
-	// Collect expired records from each of the three ledger tables.
+	// Collect expired-but-not-yet-flagged records from each of the three tables.
+	// Filter: retention_expired = false ensures idempotency across re-runs.
 	var allExpired []expiredRow
 
 	tables := []string{"worker_rosters", "wage_ledgers", "attendance_books"}
@@ -349,6 +356,7 @@ func (r *Runner) doLedgerRetention(ctx context.Context, tenantID uuid.UUID) (aff
 					 WHERE tenant_id = ?
 					   AND retention_until IS NOT NULL
 					   AND retention_until < now()
+					   AND retention_expired = false
 					 ORDER BY retention_until
 					 LIMIT 500`,
 					tbl,
@@ -367,10 +375,36 @@ func (r *Runner) doLedgerRetention(ctx context.Context, tenantID uuid.UUID) (aff
 		}
 	}
 
-	// Record an audit event per expired ledger row.
+	// For each expired row: set retention_expired = true and record an audit event.
+	// Both operations run within a single WithinTenant transaction so that the flag
+	// update and the audit entry are always consistent (atomic commit-or-rollback).
 	for _, row := range allExpired {
 		idStr := row.ID.String()
 		err := r.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+			// Set the retention_expired flag.
+			// The WHERE clause re-checks tenant_id and retention_expired = false
+			// to guard against a concurrent run updating the same row (TOCTOU).
+			//nolint:gosec // table name is from a hardcoded slice above, not user input
+			res := tx.Exec(
+				fmt.Sprintf(
+					`UPDATE %s
+					 SET retention_expired = true, updated_at = now()
+					 WHERE id = ? AND tenant_id = ?
+					   AND retention_expired = false`,
+					row.Table,
+				),
+				row.ID, tenantID,
+			)
+			if res.Error != nil {
+				return fmt.Errorf("retention: ledger retention update: %w", res.Error)
+			}
+			if res.RowsAffected == 0 {
+				// Row was already processed by a concurrent run — skip silently.
+				return nil
+			}
+
+			// Write tamper-evident audit entry.
+			// SECURITY: only the opaque row ID is stored — no PII / wage data.
 			return audit.Record(tx, audit.Entry{
 				TenantID:     tenantID,
 				UserID:       &r.systemActorID,
@@ -380,7 +414,7 @@ func (r *Runner) doLedgerRetention(ctx context.Context, tenantID uuid.UUID) (aff
 			})
 		})
 		if err != nil {
-			r.logger.Warn("retention: ledger audit record failed",
+			r.logger.Warn("retention: ledger retention update failed",
 				"tenant_id", tenantID, "table", row.Table, "id", row.ID, "error", err)
 			skipped++
 			continue

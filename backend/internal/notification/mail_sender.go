@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -53,10 +54,9 @@ import (
 // instance role — they must NEVER be hard-coded or committed.
 // See .env.example for placeholders.
 //
-// When running on EC2/ECS/Lambda with an appropriate IAM role, set
-// AccessKeyID and SecretAccessKey to empty strings; the SES API will use the
-// instance metadata credentials instead (this scaffold does not implement IMDSv2
-// credential fetching — that is production follow-up work).
+// When running on EC2/ECS with an appropriate IAM role, leave AccessKeyID and
+// SecretAccessKey empty.  SESSender will automatically fetch temporary
+// credentials from the IMDSv2 endpoint and refresh them on expiry.
 type SESConfig struct {
 	// Region is the AWS region for the SES endpoint (e.g. "ap-northeast-1").
 	// Source from: AWS_REGION environment variable.
@@ -79,19 +79,22 @@ type SESConfig struct {
 
 // SESSender sends transactional email via Amazon SES API v2.
 //
-// Scaffold status: the AWS Signature V4 signing is implemented inline so no
-// external AWS SDK dependency is required.  The HMAC-SHA256 implementation is
-// Go stdlib only.
+// AWS Signature V4 signing is implemented inline (Go stdlib only; no aws-sdk-go
+// dependency).  When AccessKeyID/SecretAccessKey are empty, temporary credentials
+// are fetched from the EC2/ECS IMDSv2 endpoint (inline implementation, no SDK).
 //
-// Production follow-up:
-//   - Implement IMDSv2 credential fetching when AccessKeyID/SecretAccessKey are
-//     empty (required for EC2/ECS deployments without static credentials).
+// Production operations:
 //   - Configure SES sending quota monitoring and CloudWatch alarms.
 //   - Enable SES event publishing (SNS topic) for bounce/complaint webhooks —
 //     see BounceWebhookHandler for intake.
 type SESSender struct {
 	cfg     SESConfig
 	baseURL string // injectable for testing; defaults to production endpoint
+
+	// imds holds a cached set of temporary IAM-role credentials fetched from IMDSv2.
+	// Protected by imdsMu; refreshed when the credentials are within 60 seconds of expiry.
+	imdsMu  sync.Mutex
+	imds    *imdsCredentials
 }
 
 // sesSendV2URL returns the SES API v2 SendEmail endpoint for the given region.
@@ -170,15 +173,24 @@ func (s *SESSender) Send(ctx context.Context, to, subject, body string) (string,
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Sign the request with AWS Signature V4 when static credentials are
-	// configured.  When credentials are empty, the request is sent unsigned
-	// (suitable only for local testing behind a signing proxy or with STS
-	// credentials injected at the transport layer).
-	if s.cfg.AccessKeyID != "" && s.cfg.SecretAccessKey != "" {
-		now := time.Now().UTC()
-		if err := signAWSv4(req, bodyBytes, s.cfg.Region, "ses", s.cfg.AccessKeyID, s.cfg.SecretAccessKey, now); err != nil {
-			return "", fmt.Errorf("notification: ses sign request: %w", err)
+	// Sign the request with AWS Signature V4.
+	// Use static credentials when configured; otherwise fetch temporary
+	// credentials from IMDSv2 (EC2/ECS instance role).
+	accessKey := s.cfg.AccessKeyID
+	secretKey := s.cfg.SecretAccessKey
+	sessionToken := ""
+	if accessKey == "" || secretKey == "" {
+		creds, err := s.fetchIMDSCredentials(ctx)
+		if err != nil {
+			return "", fmt.Errorf("notification: ses imds credentials: %w", err)
 		}
+		accessKey = creds.AccessKeyID
+		secretKey = creds.SecretAccessKey
+		sessionToken = creds.Token
+	}
+	now := time.Now().UTC()
+	if err := signAWSv4(req, bodyBytes, s.cfg.Region, "ses", accessKey, secretKey, sessionToken, now); err != nil {
+		return "", fmt.Errorf("notification: ses sign request: %w", err)
 	}
 
 	resp, err := httpClient.Do(req)
@@ -219,16 +231,23 @@ func (s *SESSender) Send(ctx context.Context, to, subject, body string) (string,
 // This is a minimal implementation covering the SendEmail use case (POST with
 // JSON body, single region/service).  It is NOT a general-purpose AWS signer.
 
-func signAWSv4(req *http.Request, body []byte, region, service, accessKeyID, secretAccessKey string, now time.Time) error {
+func signAWSv4(req *http.Request, body []byte, region, service, accessKeyID, secretAccessKey, sessionToken string, now time.Time) error {
 	datestamp := now.Format("20060102")
 	amzDate := now.Format("20060102T150405Z")
 
 	// Set required headers.
 	req.Header.Set("x-amz-date", amzDate)
 	req.Header.Set("host", req.URL.Host)
+	if sessionToken != "" {
+		// STS temporary credentials require the security token header.
+		req.Header.Set("x-amz-security-token", sessionToken)
+	}
 
 	// Canonical headers (sorted by lowercase name).
 	headerNames := []string{"content-type", "host", "x-amz-date"}
+	if sessionToken != "" {
+		headerNames = append(headerNames, "x-amz-security-token")
+	}
 	sort.Strings(headerNames)
 	var canonHeaders strings.Builder
 	for _, h := range headerNames {
@@ -292,6 +311,144 @@ func deriveSigningKey(secretAccessKey, datestamp, region, service string) []byte
 	kRegion := hmacSHA256(kDate, []byte(region))
 	kService := hmacSHA256(kRegion, []byte(service))
 	return hmacSHA256(kService, []byte("aws4_request"))
+}
+
+// ---------------------------------------------------------------------------
+// IMDSv2 credential fetching (inline; no aws-sdk-go dependency)
+//
+// Reference:
+//   https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
+//   https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html
+//
+// Flow:
+//  1. PUT /latest/api/token (X-aws-ec2-metadata-token-ttl-seconds: 21600)
+//     → receives a short-lived IMDSv2 token.
+//  2. GET /latest/meta-data/iam/security-credentials/
+//     (X-aws-ec2-metadata-token: <token>) → role name.
+//  3. GET /latest/meta-data/iam/security-credentials/<role>
+//     (X-aws-ec2-metadata-token: <token>) → JSON with AccessKeyId,
+//     SecretAccessKey, Token, Expiration.
+//
+// Credentials are cached in the SESSender and refreshed when within 60 seconds
+// of expiry to avoid per-request IMDS calls.
+// ---------------------------------------------------------------------------
+
+// imdsBase is the EC2 Instance Metadata Service v2 base URL.
+// On ECS, the same endpoint is reachable via the task metadata credential endpoint
+// (ECS_CONTAINER_METADATA_URI_V4/credentials).  For simplicity, this implementation
+// targets the EC2 IMDS endpoint; ECS deployments can also inject static credentials
+// via IAM Task Role environment variables (AWS_ACCESS_KEY_ID etc.).
+const imdsBase = "http://169.254.169.254"
+
+// imdsCredentials holds the temporary IAM credentials obtained from IMDSv2.
+type imdsCredentials struct {
+	AccessKeyID     string    `json:"AccessKeyId"`
+	SecretAccessKey string    `json:"SecretAccessKey"`
+	Token           string    `json:"Token"`
+	Expiration      time.Time `json:"Expiration"`
+}
+
+// imdsHTTPClient is a dedicated HTTP client for IMDS calls.
+// The 2-second timeout is intentionally short: if IMDS is unreachable
+// (non-EC2/ECS environment) we want a fast failure rather than blocking.
+var imdsHTTPClient = &http.Client{Timeout: 2 * time.Second}
+
+// fetchIMDSCredentials returns temporary IAM-role credentials from the EC2/ECS
+// IMDSv2 endpoint.  The result is cached; a fresh fetch is triggered only when
+// the cached credentials expire within 60 seconds.
+//
+// SECURITY: the returned AccessKeyID, SecretAccessKey, and Token are secrets
+// — they are NEVER logged, returned to callers beyond the signing step, or
+// written to any persistent store.
+func (s *SESSender) fetchIMDSCredentials(ctx context.Context) (*imdsCredentials, error) {
+	s.imdsMu.Lock()
+	defer s.imdsMu.Unlock()
+
+	// Return cached credentials if they are still valid (more than 60s remaining).
+	if s.imds != nil && time.Until(s.imds.Expiration) > 60*time.Second {
+		return s.imds, nil
+	}
+
+	// Step 1: obtain a short-lived IMDSv2 session token.
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		imdsBase+"/latest/api/token", nil)
+	if err != nil {
+		return nil, fmt.Errorf("imds: build token request: %w", err)
+	}
+	tokenReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+	tokenResp, err := imdsHTTPClient.Do(tokenReq)
+	if err != nil {
+		return nil, fmt.Errorf("imds: fetch token: %w", err)
+	}
+	defer tokenResp.Body.Close()
+	tokenBytes, err := io.ReadAll(io.LimitReader(tokenResp.Body, 512))
+	if err != nil {
+		return nil, fmt.Errorf("imds: read token: %w", err)
+	}
+	if tokenResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("imds: token endpoint returned status %d", tokenResp.StatusCode)
+	}
+	imdsToken := strings.TrimSpace(string(tokenBytes))
+
+	// Step 2: discover the IAM role name attached to this instance/task.
+	roleReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		imdsBase+"/latest/meta-data/iam/security-credentials/", nil)
+	if err != nil {
+		return nil, fmt.Errorf("imds: build role request: %w", err)
+	}
+	roleReq.Header.Set("X-aws-ec2-metadata-token", imdsToken)
+	roleResp, err := imdsHTTPClient.Do(roleReq)
+	if err != nil {
+		return nil, fmt.Errorf("imds: fetch role name: %w", err)
+	}
+	defer roleResp.Body.Close()
+	roleBytes, err := io.ReadAll(io.LimitReader(roleResp.Body, 512))
+	if err != nil {
+		return nil, fmt.Errorf("imds: read role name: %w", err)
+	}
+	if roleResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("imds: role endpoint returned status %d", roleResp.StatusCode)
+	}
+	roleName := strings.TrimSpace(string(roleBytes))
+	if roleName == "" {
+		return nil, fmt.Errorf("imds: no IAM role attached to this instance")
+	}
+	// Use the first role if multiple are listed (one per line).
+	if idx := strings.Index(roleName, "\n"); idx >= 0 {
+		roleName = roleName[:idx]
+	}
+	roleName = strings.TrimSpace(roleName)
+
+	// Step 3: fetch the temporary credentials for the discovered role.
+	credURL := imdsBase + "/latest/meta-data/iam/security-credentials/" + roleName
+	credReq, err := http.NewRequestWithContext(ctx, http.MethodGet, credURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("imds: build credentials request: %w", err)
+	}
+	credReq.Header.Set("X-aws-ec2-metadata-token", imdsToken)
+	credResp, err := imdsHTTPClient.Do(credReq)
+	if err != nil {
+		return nil, fmt.Errorf("imds: fetch credentials: %w", err)
+	}
+	defer credResp.Body.Close()
+	credBytes, err := io.ReadAll(io.LimitReader(credResp.Body, 4096))
+	if err != nil {
+		return nil, fmt.Errorf("imds: read credentials: %w", err)
+	}
+	if credResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("imds: credentials endpoint returned status %d", credResp.StatusCode)
+	}
+
+	var creds imdsCredentials
+	if err := json.Unmarshal(credBytes, &creds); err != nil {
+		return nil, fmt.Errorf("imds: parse credentials: %w", err)
+	}
+	if creds.AccessKeyID == "" || creds.SecretAccessKey == "" {
+		return nil, fmt.Errorf("imds: credentials response missing AccessKeyId or SecretAccessKey")
+	}
+
+	s.imds = &creds
+	return &creds, nil
 }
 
 // ---------------------------------------------------------------------------

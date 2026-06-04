@@ -115,6 +115,11 @@ func (Offer) TableName() string { return "offers" }
 // for CMP-006 (truthfulness / visibility): content_hash for tamper detection,
 // signed_at / signer_ref for the signing audit trail. signer_ref is an opaque
 // reference — no PII (names etc.) is stored.
+//
+// RetentionExpiresOn is computed by econtract.CalcRetentionExpiry at letter
+// issuance time when SignedAt is set.  The econtract retention job uses this
+// column to find letters eligible for logical expiry (RunEContractRetention).
+// Added by migration 00036_econtract_retention.
 type Letter struct {
 	ID              uuid.UUID  `gorm:"column:id;primaryKey"`
 	TenantID        uuid.UUID  `gorm:"column:tenant_id"`
@@ -126,8 +131,14 @@ type Letter struct {
 	ContentHash     string     `gorm:"column:content_hash"`
 	SignerRef       *string    `gorm:"column:signer_ref"`
 	SignedAt        *time.Time `gorm:"column:signed_at"`
-	CreatedAt       time.Time  `gorm:"column:created_at"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	// RetentionExpiresOn is the computed document retention expiry date.
+	// Set to CalcRetentionExpiry(SignedAt, settings.RetentionYears) when
+	// SignedAt is provided at issuance.  NULL when the letter is not yet signed
+	// or settings.RetentionYears is not available.
+	// Managed by migration 00036_econtract_retention.
+	RetentionExpiresOn *time.Time `gorm:"column:retention_expires_on"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
 }
 
 // TableName maps Letter to offer_letters.

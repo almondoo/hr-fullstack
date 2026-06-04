@@ -25,6 +25,7 @@ import (
 
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
+	"github.com/your-org/hr-saas/internal/platform/crypto"
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/logging"
 	"github.com/your-org/hr-saas/internal/platform/migrate"
@@ -60,7 +61,7 @@ func main() {
 	// return (steps that call os.Exit bypass defer — that is acceptable because
 	// those paths indicate unrecoverable startup failures).
 	otelCtx := context.Background()
-	otelShutdown, err := platformotel.Init(
+	metricsHandler, otelShutdown, err := platformotel.Init(
 		otelCtx,
 		cfg.OTelEnabled,
 		cfg.OTelExporterOTLPEndpoint,
@@ -124,10 +125,42 @@ func main() {
 	// --- 5. Router ---
 	tdb := tenantdb.New(database)
 	sessionStore := platformauth.NewSessionStore()
+
+	// --- 5a. Field-level encryption (AES-256-GCM) ---
+	// Build the FieldCipher from the configured key provider before the server
+	// starts so that any crypto misconfiguration causes a fast startup failure
+	// rather than a runtime error on the first PII write.
+	//
+	// KEY_PROVIDER defaults to "env" (reads FIELD_ENCRYPTION_KEY); set to
+	// "aws-kms" in production and provide KMS_KEY_ID.  In development the env
+	// provider generates an ephemeral key when FIELD_ENCRYPTION_KEY is unset.
+	//
+	// SECURITY: the DEK is fetched once, used to initialise the AES-256-GCM
+	// cipher, and then zeroed immediately inside NewFieldCipherFromProvider.
+	// The plaintext key never appears in logs or error messages.
+	keyProvider, err := crypto.NewKeyProviderFromConfig(
+		dbCtx,
+		cfg.KeyProvider,
+		cfg.IsDevelopment(),
+		cfg.KMSKeyID,
+		cfg.AWSRegion,
+	)
+	if err != nil {
+		logger.Error("field cipher: failed to build key provider", "error", err)
+		os.Exit(1)
+	}
+	fieldCipher, err := crypto.NewFieldCipherFromProvider(dbCtx, keyProvider)
+	if err != nil {
+		logger.Error("field cipher: failed to initialise", "error", err)
+		os.Exit(1)
+	}
+
 	deps := server.Deps{
-		AppDB:        database,
-		TenantDB:     tdb,
-		SessionStore: sessionStore,
+		AppDB:          database,
+		TenantDB:       tdb,
+		SessionStore:   sessionStore,
+		FieldCipher:    fieldCipher,
+		MetricsHandler: metricsHandler,
 	}
 	router := server.New(cfg, deps, logger)
 

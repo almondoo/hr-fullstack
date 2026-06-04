@@ -19,6 +19,20 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
 
+// providerName is used as the Provider field in email_deliveries rows.
+// It is set once at startup from the MAIL_PROVIDER environment variable and
+// is never logged or written to sensitive output.
+var providerName = "mock"
+
+// SetProviderName sets the global mail provider name used in email_deliveries
+// rows.  Call once at startup from the composition root (server.go) before
+// any Publish calls.  Valid values: "ses", "sendgrid", "mock".
+func SetProviderName(name string) {
+	if name != "" {
+		providerName = name
+	}
+}
+
 // Sentinel errors.
 var (
 	ErrNotFound          = errors.New("notification: not found")
@@ -106,6 +120,12 @@ func hashEmail(email string) string {
 // Service provides business logic for the notification platform.
 type Service struct {
 	tdb         *tenantdb.TenantDB
+	// systemDB is a raw *gorm.DB connection used for cross-tenant / system-context
+	// queries (e.g. webhook bounce lookup that bypasses RLS).  It MUST be a
+	// connection that holds the BYPASSRLS privilege (postgres superuser or a
+	// dedicated hr_system role).  When nil, system-context operations log a
+	// warning and return empty results.
+	systemDB    *gorm.DB
 	mailer      MailSender
 	chatSenders []ChatSender
 }
@@ -122,6 +142,23 @@ func NewServiceWithMailer(tdb *tenantdb.TenantDB, mailer MailSender) *Service {
 		mailer = MockSender{}
 	}
 	return &Service{tdb: tdb, mailer: mailer}
+}
+
+// NewServiceFull constructs a Service with a custom MailSender, a system-context
+// DB connection for cross-tenant webhook lookups, and optional chat senders.
+//
+// systemDB must be connected via a role with BYPASSRLS (e.g. the postgres
+// superuser or a dedicated hr_system role).  It is used ONLY for webhook bounce
+// lookups where no tenant context is available; all normal tenant-scoped
+// operations continue to go through tdb.WithinTenant.
+//
+// Pass nil for systemDB to fall back to the no-op stub behaviour (webhook
+// lookups will log a warning and return empty).
+func NewServiceFull(tdb *tenantdb.TenantDB, mailer MailSender, systemDB *gorm.DB, chatSenders ...ChatSender) *Service {
+	if mailer == nil {
+		mailer = MockSender{}
+	}
+	return &Service{tdb: tdb, mailer: mailer, systemDB: systemDB, chatSenders: chatSenders}
 }
 
 // NewServiceWithChat constructs a Service with both a custom MailSender and a
@@ -641,43 +678,53 @@ func (s *Service) Publish(ctx context.Context, in PublishInput) (*PublishResult,
 				return err
 			}
 			if emailDec.deliver && rc.hasMail {
-				subj, err := renderTemplate(emailSubjTmpl, data)
-				if err != nil {
-					return err
-				}
-				bodyRef, err := renderTemplate(emailBodyTmpl, data)
-				if err != nil {
-					return err
-				}
-				n, err := insertNotification(tx, in, r.UserID, ChannelEmail, subj, bodyRef)
-				if err != nil {
-					return err
-				}
-				result.Notifications = append(result.Notifications, *n)
+				// Suppression list check: skip re-sending to addresses that have
+				// previously bounced or generated a complaint.
+				if isSuppressed(tx, in.TenantID, rc.hash) {
+					result.Suppressed++
+					slog.Info("notification: publish: suppressing delivery to bounced/complained address",
+						"tenant_id", in.TenantID.String(),
+						"hash_prefix", rc.hash[:12],
+					)
+				} else {
+					subj, err := renderTemplate(emailSubjTmpl, data)
+					if err != nil {
+						return err
+					}
+					bodyRef, err := renderTemplate(emailBodyTmpl, data)
+					if err != nil {
+						return err
+					}
+					n, err := insertNotification(tx, in, r.UserID, ChannelEmail, subj, bodyRef)
+					if err != nil {
+						return err
+					}
+					result.Notifications = append(result.Notifications, *n)
 
-				d := EmailDelivery{
-					ID:             uuid.New(),
-					TenantID:       in.TenantID,
-					NotificationID: n.ID,
-					ToEmailHash:    rc.hash,
-					ToEmailEnc:     rc.enc,
-					Provider:       "mock",
-					Status:         DeliveryStatusQueued,
-					Attempts:       0,
-					MaxAttempts:    3,
+					d := EmailDelivery{
+						ID:             uuid.New(),
+						TenantID:       in.TenantID,
+						NotificationID: n.ID,
+						ToEmailHash:    rc.hash,
+						ToEmailEnc:     rc.enc,
+						Provider:       providerName,
+						Status:         DeliveryStatusQueued,
+						Attempts:       0,
+						MaxAttempts:    3,
+					}
+					if err := tx.Exec(
+						`INSERT INTO email_deliveries
+						   (id, tenant_id, notification_id, to_email_hash, to_email_enc,
+						    provider, status, attempts, max_attempts)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						d.ID, d.TenantID, d.NotificationID, d.ToEmailHash, d.ToEmailEnc,
+						d.Provider, d.Status, d.Attempts, d.MaxAttempts,
+					).Error; err != nil {
+						return fmt.Errorf("notification: publish insert delivery: %w", err)
+					}
+					d.ToEmailEnc = nil // never expose ciphertext to callers
+					result.Deliveries = append(result.Deliveries, d)
 				}
-				if err := tx.Exec(
-					`INSERT INTO email_deliveries
-					   (id, tenant_id, notification_id, to_email_hash, to_email_enc,
-					    provider, status, attempts, max_attempts)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					d.ID, d.TenantID, d.NotificationID, d.ToEmailHash, d.ToEmailEnc,
-					d.Provider, d.Status, d.Attempts, d.MaxAttempts,
-				).Error; err != nil {
-					return fmt.Errorf("notification: publish insert delivery: %w", err)
-				}
-				d.ToEmailEnc = nil // never expose ciphertext to callers
-				result.Deliveries = append(result.Deliveries, d)
 			} else {
 				result.Suppressed++ // suppressed: no permission, no preference, or no address
 			}
@@ -753,6 +800,29 @@ func insertNotification(tx *gorm.DB, in PublishInput, recipientUserID uuid.UUID,
 		return nil, fmt.Errorf("notification: insert notification: %w", err)
 	}
 	return &n, nil
+}
+
+// isSuppressed returns true when the given email hash has a bounced or
+// complained delivery record for the tenant.  This prevents re-sending to
+// addresses on the suppression list.
+//
+// tx must be scoped to the correct tenant (called within WithinTenant).  On
+// any DB error the function returns false (fail-open for suppression — the
+// delivery is attempted and the underlying error will surface through the
+// send path).
+func isSuppressed(tx *gorm.DB, tenantID uuid.UUID, emailHash string) bool {
+	var count int64
+	if err := tx.Raw(
+		`SELECT COUNT(1) FROM email_deliveries
+		 WHERE tenant_id = ? AND to_email_hash = ?
+		   AND status IN (?, ?)
+		 LIMIT 1`,
+		tenantID, emailHash, DeliveryStatusBounced, DeliveryStatusComplained,
+	).Scan(&count).Error; err != nil {
+		slog.Warn("notification: isSuppressed query error (allowing send)", "error", err.Error())
+		return false
+	}
+	return count > 0
 }
 
 // verifyUserInTenant confirms the user belongs to the tenant.  users has no
@@ -1210,4 +1280,92 @@ func (s *Service) ListDeliveries(ctx context.Context, tenantID, notificationID u
 		return nil, err
 	}
 	return ds, nil
+}
+
+// ---------------------------------------------------------------------------
+// Chat destination config (tenant admin)
+// ---------------------------------------------------------------------------
+
+// UpsertChatDestinationInput holds fields for creating/updating a tenant chat
+// destination configuration row.
+//
+// SECURITY: EnvKeyRef stores the environment variable NAME that holds the
+// Webhook URL / channel token.  The actual secret must never be passed here.
+type UpsertChatDestinationInput struct {
+	TenantID uuid.UUID
+	ActorID  uuid.UUID
+	Channel  string
+	Label    string
+	// EnvKeyRef is the environment variable name (e.g. "NOTIFICATION_SLACK_WEBHOOK_URL").
+	// SECURITY: store only the variable name, not the secret value.
+	EnvKeyRef string
+	Active    bool
+	IP        *string
+}
+
+// UpsertChatDestination creates or updates the chat destination for a
+// (tenant_id, channel) pair.
+func (s *Service) UpsertChatDestination(ctx context.Context, in UpsertChatDestinationInput) (*TenantChatDestination, error) {
+	dest := TenantChatDestination{
+		ID:        uuid.New(),
+		TenantID:  in.TenantID,
+		Channel:   in.Channel,
+		Label:     in.Label,
+		EnvKeyRef: in.EnvKeyRef,
+		Active:    in.Active,
+	}
+	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			`INSERT INTO tenant_chat_destinations
+			   (id, tenant_id, channel, label, env_key_ref, active)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (tenant_id, channel) DO UPDATE
+			   SET label      = EXCLUDED.label,
+			       env_key_ref = EXCLUDED.env_key_ref,
+			       active     = EXCLUDED.active,
+			       updated_at = now()`,
+			dest.ID, dest.TenantID, dest.Channel, dest.Label, dest.EnvKeyRef, dest.Active,
+		).Error; err != nil {
+			return fmt.Errorf("notification: upsert chat destination: %w", err)
+		}
+		if err := tx.Raw(
+			`SELECT id, tenant_id, channel, label, env_key_ref, active, created_at, updated_at
+			 FROM tenant_chat_destinations
+			 WHERE tenant_id = ? AND channel = ? LIMIT 1`,
+			in.TenantID, in.Channel,
+		).Scan(&dest).Error; err != nil {
+			return fmt.Errorf("notification: upsert chat destination re-read: %w", err)
+		}
+		idStr := dest.ID.String()
+		return audit.Record(tx, audit.Entry{
+			TenantID:     in.TenantID,
+			UserID:       &in.ActorID,
+			Action:       "notification_chat_destination.upserted",
+			ResourceType: "tenant_chat_destination",
+			ResourceID:   &idStr,
+			IP:           in.IP,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dest, nil
+}
+
+// ListChatDestinations returns the active chat destinations for a tenant.
+func (s *Service) ListChatDestinations(ctx context.Context, tenantID uuid.UUID) ([]TenantChatDestination, error) {
+	var dests []TenantChatDestination
+	err := s.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		return tx.Raw(
+			`SELECT id, tenant_id, channel, label, env_key_ref, active, created_at, updated_at
+			 FROM tenant_chat_destinations
+			 WHERE tenant_id = ?
+			 ORDER BY channel`,
+			tenantID,
+		).Scan(&dests).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dests, nil
 }

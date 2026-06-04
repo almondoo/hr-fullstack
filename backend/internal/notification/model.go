@@ -180,3 +180,53 @@ const (
 	OutboxStatusProcessed = "processed"
 	OutboxStatusFailed    = "failed"
 )
+
+// Chat delivery status constants (mirror chat_deliveries.status CHECK).
+const (
+	ChatDeliveryStatusQueued = "queued"
+	ChatDeliveryStatusSent   = "sent"
+	ChatDeliveryStatusFailed = "failed"
+)
+
+// TenantChatDestination is the GORM model for tenant_chat_destinations.
+//
+// SECURITY: EnvKeyRef holds the name of the environment variable that contains
+// the Webhook URL or channel token — NOT the secret value itself.  Real secrets
+// must never be stored in this table.
+type TenantChatDestination struct {
+	ID        uuid.UUID `gorm:"column:id;primaryKey"`
+	TenantID  uuid.UUID `gorm:"column:tenant_id"`
+	Channel   string    `gorm:"column:channel"`
+	Label     string    `gorm:"column:label"`
+	EnvKeyRef string    `gorm:"column:env_key_ref"`
+	Active    bool      `gorm:"column:active"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+// TableName maps TenantChatDestination to tenant_chat_destinations.
+func (TenantChatDestination) TableName() string { return "tenant_chat_destinations" }
+
+// ChatDelivery is the GORM model for chat_deliveries.
+//
+// SECURITY: message bodies and recipient PII must never appear here.
+// Only opaque identifiers (notification_id, channel, event_type) and delivery
+// metadata (status, attempts, delivery_token) are stored.
+type ChatDelivery struct {
+	ID             uuid.UUID  `gorm:"column:id;primaryKey"`
+	TenantID       uuid.UUID  `gorm:"column:tenant_id"`
+	NotificationID uuid.UUID  `gorm:"column:notification_id"`
+	Channel        string     `gorm:"column:channel"`
+	EventType      string     `gorm:"column:event_type"`
+	Status         string     `gorm:"column:status"`
+	Attempts       int        `gorm:"column:attempts"`
+	MaxAttempts    int        `gorm:"column:max_attempts"`
+	LastError      string     `gorm:"column:last_error"`
+	DeliveryToken  string     `gorm:"column:delivery_token"`
+	SentAt         *time.Time `gorm:"column:sent_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at"`
+}
+
+// TableName maps ChatDelivery to chat_deliveries.
+func (ChatDelivery) TableName() string { return "chat_deliveries" }

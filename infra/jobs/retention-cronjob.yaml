@@ -1,0 +1,130 @@
+# ===========================================================================
+# Kubernetes CronJob — hr-saas retention job
+# ===========================================================================
+# PURPOSE:
+#   Runs cmd/retention -all-tenants daily at 02:00 UTC to execute the four
+#   retention sub-jobs (mynumber_disposal / ledger_retention /
+#   employee_data_policy / document_expiry) across every active tenant.
+#
+# STATUS:
+#   EXAMPLE ONLY — real deployment wiring depends on #9 (デプロイ先決定).
+#   Cluster name, namespace, image registry, secret names, resource limits,
+#   and service-account provisioning must be adapted for the target environment.
+#
+# PREREQUISITES (operator checklist before applying):
+#   1. Build and push the retention binary image:
+#        docker build -f backend/Dockerfile.retention -t <REGISTRY>/hr-retention:<TAG> backend/
+#        docker push <REGISTRY>/hr-retention:<TAG>
+#   2. Create the Kubernetes Secret:
+#        kubectl create secret generic hr-retention-secrets \
+#          --from-literal=DB_PASSWORD='<hr_app role password>' \
+#          --from-literal=RETENTION_ACTOR_ID='<service-account UUID>'
+#      See docs/ops/retention-service-account.md for how to provision the actor.
+#   3. Substitute <REGISTRY>, <TAG>, <NAMESPACE>, <DB_HOST>, <DB_NAME> below.
+#   4. Review the schedule — 02:00 UTC may need adjustment for your time zone.
+#   5. Confirm with 社労士/弁護士 that the disposal-method default is appropriate.
+#
+# SECURITY:
+#   - The Pod runs as a non-root user (runAsNonRoot: true).
+#   - Secrets are injected via env vars from a Secret ref (never hardcoded).
+#   - The retention binary connects as hr_app (NOBYPASSRLS); RLS is enforced.
+#   - See SECURITY.md §4 for the full security checklist.
+#
+# LEGAL NOTE:
+#   Retention periods and disposal methods used by this job are controlled by
+#   operator configuration (ledger_settings, -employee-grace-days, etc.).
+#   All threshold values require confirmation by 社労士/弁護士 against primary
+#   statutory sources before production deployment.
+# ===========================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hr-retention
+  namespace: <NAMESPACE>          # TODO: substitute real namespace
+  labels:
+    app: hr-retention
+    component: batch
+spec:
+  # Daily at 02:00 UTC.  Adjust for your desired timezone / window.
+  schedule: "0 2 * * *"
+
+  # Do not allow concurrent runs — a previous sweep must finish before starting
+  # the next one to avoid double-processing and lock contention.
+  concurrencyPolicy: Forbid
+
+  # Retain the last 3 successful and 1 failed job for log inspection.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      # Retry once on failure before marking the job as failed.
+      backoffLimit: 1
+
+      # Time-limit: 90 minutes is generous for a full all-tenants sweep.
+      # Adjust based on observed P99 sweep duration after initial deployment.
+      activeDeadlineSeconds: 5400
+
+      template:
+        metadata:
+          labels:
+            app: hr-retention
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+
+          containers:
+            - name: retention
+              image: <REGISTRY>/hr-retention:<TAG>    # TODO: substitute
+              args:
+                - "-all-tenants"
+                - "-disposal-method=ciphertext_deleted"
+                # To enable employee data policy: add -employee-grace-days=<N>
+                # where N is the grace period in days after 社労士/弁護士 review.
+
+              env:
+                # Database connection (hr_app role, DML only, NOBYPASSRLS).
+                - name: DB_HOST
+                  value: "<DB_HOST>"                  # TODO: substitute
+                - name: DB_PORT
+                  value: "5432"
+                - name: DB_USER
+                  value: "hr_app"
+                - name: DB_NAME
+                  value: "<DB_NAME>"                  # TODO: substitute
+                - name: DB_SSLMODE
+                  value: "require"                    # always require TLS in prod
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: hr-retention-secrets
+                      key: DB_PASSWORD
+
+                # Service-account actor UUID injected from Secret.
+                # See docs/ops/retention-service-account.md for provisioning.
+                - name: RETENTION_ACTOR_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: hr-retention-secrets
+                      key: RETENTION_ACTOR_ID
+
+                # Application environment tag (used by logging.New).
+                - name: APP_ENV
+                  value: "production"
+
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]

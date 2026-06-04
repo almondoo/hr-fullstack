@@ -155,7 +155,11 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 			SessionCookieSecure: true,
 			CSRFSecure:          true, // I-7: required in non-development
 			// 64 hex chars = 32 bytes, placeholder value safe for tests.
-			CSRFAuthKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			CSRFAuthKey:     "0000000000000000000000000000000000000000000000000000000000000001",
+			SessionHashKey:  "0000000000000000000000000000000000000000000000000000000000000002",
+			SessionBlockKey: "0000000000000000000000000000000000000000000000000000000000000003",
+			// 44 base64 chars = 32 bytes encoded, synthetic placeholder.
+			FieldEncryptionKey: "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVoxMjM0NTY=",
 		}
 		err := cfg.validate()
 		if err != nil {
@@ -174,7 +178,11 @@ func TestValidateAdminCredentialsRequiredInProd(t *testing.T) {
 			SessionCookieSecure: true,
 			CSRFSecure:          true, // I-7: required in non-development
 			// 64 hex chars = 32 bytes, placeholder value safe for tests.
-			CSRFAuthKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			CSRFAuthKey:     "0000000000000000000000000000000000000000000000000000000000000001",
+			SessionHashKey:  "0000000000000000000000000000000000000000000000000000000000000002",
+			SessionBlockKey: "0000000000000000000000000000000000000000000000000000000000000003",
+			// 44 base64 chars = 32 bytes encoded, synthetic placeholder.
+			FieldEncryptionKey: "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVoxMjM0NTY=",
 		}
 		err := cfg.validate()
 		if err != nil {

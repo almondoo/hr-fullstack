@@ -161,9 +161,23 @@ type CallbackParams struct {
 	Code  string // authorisation code
 	State string // must match the state stored in the user's session
 
+	// PKCEVerifier is the PKCE code_verifier generated during AuthRedirectURL.
+	// Must be retrieved from the server-side session and provided here.
+	// Empty means PKCE is not used (not recommended).
+	PKCEVerifier string
+
+	// Nonce is the nonce embedded in the authorization URL (OIDC).
+	// Must be retrieved from the server-side session and verified against
+	// the "nonce" claim in the ID token.
+	Nonce string
+
 	// SAML fields
 	SAMLResponse string // base64-encoded SAMLResponse POST parameter
 	RelayState   string // SAML equivalent of OIDC state
+
+	// SAMLRequestIDs contains the outstanding AuthnRequest IDs that may
+	// correspond to this response. Used for InResponseTo validation (replay protection).
+	SAMLRequestIDs []string
 }
 
 // ProviderRepository is the read-only data-access interface for loading

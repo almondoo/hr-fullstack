@@ -1,29 +1,27 @@
 terraform {
   required_version = ">= 1.6"
 
-  # TODO(#9): バックエンドをクラウド選定後に設定する
-  # backend "s3" {
-  #   bucket  = "TODO: tfstate バケット名"
-  #   key     = "production/terraform.tfstate"
-  #   region  = "TODO: リージョン"
-  #   encrypt = true  # 必須: State ファイルの暗号化
-  # }
-  # backend "gcs" { bucket = "TODO"; prefix = "production" }
-  # backend "azurerm" { resource_group_name = "TODO"; storage_account_name = "TODO"; container_name = "tfstate"; key = "production.tfstate" }
+  # State バックエンド: S3 + DynamoDB ロック (#9)
+  # NOTE: バケット名・リージョン・テーブル名は実環境に合わせて設定すること。
+  #       値はこのファイルに書かずに、init 時に -backend-config フラグで渡すこと。
+  #       例:
+  #         terraform init \
+  #           -backend-config="bucket=<your-tfstate-bucket>" \
+  #           -backend-config="key=production/terraform.tfstate" \
+  #           -backend-config="region=ap-northeast-1" \
+  #           -backend-config="dynamodb_table=<your-tfstate-lock-table>"
+  backend "s3" {
+    # bucket         = "<your-tfstate-bucket>"       # 手動設定 (init -backend-config 推奨)
+    key     = "production/terraform.tfstate"
+    region  = "ap-northeast-1"
+    encrypt = true # 必須: State ファイルの暗号化 (README.md セキュリティ原則)
+    # dynamodb_table = "<your-tfstate-lock-table>"   # 手動設定
+  }
 
   required_providers {
-    # TODO(#9): 選択したプロバイダのみを有効化する
-    # aws = {
-    #   source  = "hashicorp/aws"
-    #   version = "~> 5.0"
-    # }
-    # google = {
-    #   source  = "hashicorp/google"
-    #   version = "~> 5.0"
-    # }
-    # azurerm = {
-    #   source  = "hashicorp/azurerm"
-    #   version = "~> 3.0"
-    # }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
   }
 }

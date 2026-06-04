@@ -33,13 +33,22 @@ package notification
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rsa"
+	"crypto/sha1" //nolint:gosec // SNS message signing uses SHA1 per AWS spec
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -116,6 +125,12 @@ type snsEnvelope struct {
 	SubscribeURL     string `json:"SubscribeURL"`
 	UnsubscribeURL   string `json:"UnsubscribeUrl"`
 	Token            string `json:"Token"`
+	// Signature fields for message authenticity verification.
+	Signature        string `json:"Signature"`
+	SigningCertURL   string `json:"SigningCertURL"`
+	Subject          string `json:"Subject"`
+	Timestamp        string `json:"Timestamp"`
+	SignatureVersion string `json:"SignatureVersion"`
 }
 
 // sesBounceMessage is the SES event notification embedded in SNS Message.
@@ -150,12 +165,12 @@ type sesMail struct {
 // Flow:
 //  1. Validate the X-Amz-Sns-Topic-Arn header against cfg.SNSTopicARN.
 //  2. Parse the SNS envelope.
-//  3. For SubscriptionConfirmation: log the SubscribeURL for manual confirmation
+//  3. Verify the SNS message signature (fail-closed): fetch the signing cert by
+//     SigningCertURL (SSRF-guarded to *.amazonaws.com only), then verify the
+//     RSA-SHA1 signature per the AWS SNS specification.
+//  4. For SubscriptionConfirmation: log the SubscribeURL for manual confirmation
 //     (auto-confirm is a security risk — an operator must visit the URL).
-//  4. For Notification: parse the SES event and call MarkBounced per recipient.
-//
-// Production follow-up: implement full SNS message signature verification
-// (fetch signing cert by SigningCertURL, verify the Signature field).
+//  5. For Notification: parse the SES event and call MarkBounced per recipient.
 func (h *BounceWebhookHandler) HandleSESBounce(c *gin.Context) {
 	// Validate SNS topic ARN when configured.
 	if h.cfg.SNSTopicARN != "" {
@@ -178,6 +193,16 @@ func (h *BounceWebhookHandler) HandleSESBounce(c *gin.Context) {
 	var env snsEnvelope
 	if err := json.Unmarshal(rawBody, &env); err != nil {
 		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", "invalid JSON")
+		return
+	}
+
+	// SNS message signature verification — fail-closed.
+	// We verify for both Notification and SubscriptionConfirmation types.
+	if err := verifySNSSignature(env); err != nil {
+		slog.Warn("notification: ses bounce webhook: SNS signature verification failed",
+			"error", err.Error(),
+		)
+		httpx.RespondError(c, http.StatusForbidden, "FORBIDDEN", "SNS signature invalid")
 		return
 	}
 
@@ -210,6 +235,139 @@ func (h *BounceWebhookHandler) HandleSESBounce(c *gin.Context) {
 		c.Status(http.StatusOK)
 	}
 }
+
+// verifySNSSignature verifies the RSA-SHA1 signature of an SNS message.
+//
+// Algorithm (per AWS docs):
+//  1. Validate SigningCertURL host ends with ".amazonaws.com" (SSRF guard).
+//  2. Fetch the PEM certificate from the validated URL.
+//  3. Build the canonical string-to-sign from the message fields (type-dependent).
+//  4. Decode the base64 Signature field and verify against the RSA public key.
+//
+// Fail-closed: any error (missing fields, invalid cert, bad URL, verify failure)
+// returns an error so the caller can reject the request.
+//
+// SNS message signing uses SHA1 as mandated by the AWS SNS specification.
+// This is a protocol requirement, not a security choice.
+func verifySNSSignature(env snsEnvelope) error {
+	if env.SigningCertURL == "" || env.Signature == "" {
+		return fmt.Errorf("sns: missing SigningCertURL or Signature")
+	}
+
+	// SSRF guard: the signing cert URL must be an https URL on amazonaws.com.
+	certURL, err := url.Parse(env.SigningCertURL)
+	if err != nil {
+		return fmt.Errorf("sns: invalid SigningCertURL: %w", err)
+	}
+	if certURL.Scheme != "https" {
+		return fmt.Errorf("sns: SigningCertURL must use https")
+	}
+	host := certURL.Hostname()
+	if !strings.HasSuffix(host, ".amazonaws.com") {
+		return fmt.Errorf("sns: SigningCertURL host %q is not *.amazonaws.com", host)
+	}
+
+	// Fetch the signing certificate (bounded response, short timeout).
+	certResp, err := snsHTTPClient.Get(env.SigningCertURL) //nolint:noctx // short-lived cert fetch; context would require plumbing
+	if err != nil {
+		return fmt.Errorf("sns: fetch signing cert: %w", err)
+	}
+	defer certResp.Body.Close()
+	certPEM, err := io.ReadAll(io.LimitReader(certResp.Body, 32*1024))
+	if err != nil {
+		return fmt.Errorf("sns: read signing cert: %w", err)
+	}
+
+	// Parse PEM → DER → x509 certificate → RSA public key.
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return fmt.Errorf("sns: no PEM block found in signing cert response")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("sns: parse signing cert: %w", err)
+	}
+	rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("sns: signing cert does not contain an RSA public key")
+	}
+
+	// Build the canonical string to sign (field order is type-dependent per AWS docs).
+	strToSign := snsStringToSign(env)
+
+	// Decode the base64 signature.
+	sigBytes, err := base64.StdEncoding.DecodeString(env.Signature)
+	if err != nil {
+		return fmt.Errorf("sns: decode signature: %w", err)
+	}
+
+	// Verify RSA-SHA1 signature (AWS SNS mandates SHA1).
+	h := sha1.New() //nolint:gosec // required by AWS SNS message signing spec
+	h.Write([]byte(strToSign))
+	digest := h.Sum(nil)
+	if err := rsa.VerifyPKCS1v15(rsaPub, 0, digest, sigBytes); err != nil {
+		return fmt.Errorf("sns: signature verification failed: %w", err)
+	}
+	return nil
+}
+
+// snsStringToSign builds the canonical string for SNS message signature
+// verification per the AWS SNS specification.
+// https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html
+func snsStringToSign(env snsEnvelope) string {
+	var b strings.Builder
+	switch env.Type {
+	case "Notification":
+		b.WriteString("Message\n")
+		b.WriteString(env.Message)
+		b.WriteString("\n")
+		b.WriteString("MessageId\n")
+		b.WriteString(env.MessageID)
+		b.WriteString("\n")
+		if env.Subject != "" {
+			b.WriteString("Subject\n")
+			b.WriteString(env.Subject)
+			b.WriteString("\n")
+		}
+		b.WriteString("Timestamp\n")
+		b.WriteString(env.Timestamp)
+		b.WriteString("\n")
+		b.WriteString("TopicArn\n")
+		b.WriteString(env.TopicARN)
+		b.WriteString("\n")
+		b.WriteString("Type\n")
+		b.WriteString(env.Type)
+		b.WriteString("\n")
+	default: // SubscriptionConfirmation, UnsubscribeConfirmation
+		b.WriteString("Message\n")
+		b.WriteString(env.Message)
+		b.WriteString("\n")
+		b.WriteString("MessageId\n")
+		b.WriteString(env.MessageID)
+		b.WriteString("\n")
+		b.WriteString("SubscribeURL\n")
+		b.WriteString(env.SubscribeURL)
+		b.WriteString("\n")
+		b.WriteString("Timestamp\n")
+		b.WriteString(env.Timestamp)
+		b.WriteString("\n")
+		b.WriteString("Token\n")
+		b.WriteString(env.Token)
+		b.WriteString("\n")
+		b.WriteString("TopicArn\n")
+		b.WriteString(env.TopicARN)
+		b.WriteString("\n")
+		b.WriteString("Type\n")
+		b.WriteString(env.Type)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// snsHTTPClient is a dedicated HTTP client for fetching SNS signing certificates.
+// It uses a short timeout and is separate from httpClient to allow independent
+// tuning.
+var snsHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // processSESNotification routes a parsed SES bounce/complaint message to the
 // delivery status update logic.
@@ -305,16 +463,23 @@ type sendGridEvent struct {
 	Timestamp float64 `json:"timestamp"`
 }
 
+// sendGridWebhookMaxAge is the maximum acceptable age of a SendGrid webhook
+// event, used for replay-attack prevention.  Events with a timestamp header
+// older than this window are rejected.
+const sendGridWebhookMaxAge = 5 * time.Minute
+
 // HandleSendGridEvent processes the SendGrid Event Webhook payload.
 //
 // Flow:
-//  1. Optionally verify HMAC-SHA256 signature when cfg.SendGridWebhookSigningKey is set.
-//  2. Parse the event array.
-//  3. For "bounce" and "spamreport" events, look up matching deliveries by
+//  1. Read the raw body (bounded read).
+//  2. When cfg.SendGridWebhookSigningKey is set:
+//     a. Validate the X-Twilio-Email-Event-Webhook-Timestamp is within the
+//        allowed window (replay protection).
+//     b. Verify the HMAC-SHA256 signature with timestamp+body as the input
+//        (per SendGrid Signed Events specification).
+//  3. Parse the event array.
+//  4. For "bounce" and "spamreport" events, look up matching deliveries by
 //     provider_message_id and email hash, then call MarkBounced.
-//
-// Production follow-up: provision the Signed Events key in the SendGrid
-// dashboard and set NOTIFICATION_SENDGRID_WEBHOOK_SIGNING_KEY.
 func (h *BounceWebhookHandler) HandleSendGridEvent(c *gin.Context) {
 	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 256*1024))
 	if err != nil {
@@ -322,9 +487,20 @@ func (h *BounceWebhookHandler) HandleSendGridEvent(c *gin.Context) {
 		return
 	}
 
-	// Signature verification (optional; skipped when signing key is not configured).
+	// Signature + timestamp replay-protection (when signing key is configured).
 	if h.cfg.SendGridWebhookSigningKey != "" {
-		if !verifySignature(rawBody, c.GetHeader("X-Twilio-Email-Event-Webhook-Signature"), h.cfg.SendGridWebhookSigningKey) {
+		tsHeader := c.GetHeader("X-Twilio-Email-Event-Webhook-Timestamp")
+		sigHeader := c.GetHeader("X-Twilio-Email-Event-Webhook-Signature")
+
+		// Timestamp replay-protection: reject events outside the allowed window.
+		if !verifyTimestamp(tsHeader, sendGridWebhookMaxAge) {
+			slog.Warn("notification: sendgrid webhook: timestamp outside allowed window")
+			httpx.RespondError(c, http.StatusForbidden, "FORBIDDEN", "invalid timestamp")
+			return
+		}
+
+		// Signature verification: HMAC-SHA256(key, timestamp + body).
+		if !verifySignature(rawBody, tsHeader, sigHeader, h.cfg.SendGridWebhookSigningKey) {
 			slog.Warn("notification: sendgrid webhook: signature verification failed")
 			httpx.RespondError(c, http.StatusForbidden, "FORBIDDEN", "invalid signature")
 			return
@@ -351,16 +527,35 @@ func (h *BounceWebhookHandler) HandleSendGridEvent(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
+// verifyTimestamp returns true if the Unix-second timestamp string is within
+// maxAge of the current time.  An empty or unparseable timestamp always returns
+// false (fail-closed).
+func verifyTimestamp(tsHeader string, maxAge time.Duration) bool {
+	if tsHeader == "" {
+		return false
+	}
+	tsSec, err := strconv.ParseFloat(tsHeader, 64)
+	if err != nil {
+		return false
+	}
+	tsTime := time.Unix(int64(tsSec), int64((tsSec-math.Trunc(tsSec))*1e9))
+	age := time.Since(tsTime)
+	if age < 0 {
+		age = -age // future timestamps from clock skew
+	}
+	return age <= maxAge
+}
+
 // verifySignature verifies the HMAC-SHA256 signature from SendGrid's Signed
 // Events feature.
 //
-// SendGrid computes: HMAC-SHA256(signingKey, timestamp+body) and base64-encodes it.
-// The timestamp is delivered in X-Twilio-Email-Event-Webhook-Timestamp; here we
-// verify against the body alone for scaffold simplicity.
+// Per the SendGrid specification the HMAC input is the concatenation of the
+// timestamp header value and the raw request body (no separator):
 //
-// Production follow-up: include the timestamp header in the HMAC input and
-// validate the timestamp is within an acceptable window (replay protection).
-func verifySignature(body []byte, sigHeader, signingKey string) bool {
+//	HMAC-SHA256(signingKey, timestampHeader + rawBody)
+//
+// The result is base64-encoded and compared against the X-Twilio-Email-Event-Webhook-Signature header.
+func verifySignature(body []byte, tsHeader, sigHeader, signingKey string) bool {
 	if sigHeader == "" {
 		return false
 	}
@@ -369,6 +564,8 @@ func verifySignature(body []byte, sigHeader, signingKey string) bool {
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(signingKey))
+	// Input is timestamp + body, concatenated (no separator), per SendGrid spec.
+	mac.Write([]byte(tsHeader))
 	mac.Write(body)
 	expected := mac.Sum(nil)
 	return hmac.Equal(expected, sigBytes)
@@ -381,34 +578,39 @@ func verifySignature(body []byte, sigHeader, signingKey string) bool {
 // findDeliveriesByProviderAndHash returns email_deliveries rows matching the
 // given provider_message_id and to_email_hash across all tenants.
 //
-// This is a cross-tenant lookup (webhook has no tenant context).  RLS is
-// bypassed intentionally here; the query is scoped tightly to the two opaque
-// identifiers.  The result set is expected to be a single row in practice.
+// This is a cross-tenant lookup (webhook has no tenant context).  It uses
+// s.systemDB — a *gorm.DB connection that bypasses RLS — scoped tightly to
+// the two opaque identifiers.  The result set is expected to be a single row
+// in practice.
 //
-// NOTE: this requires a DB session with superuser or rls-bypass role, which is
-// how the notification service's TenantDB connection should be configured for
-// background/webhook use.  Production follow-up: wire via the existing
-// privileged DB connection used by background workers.
+// SECURITY: provider_message_id and to_email_hash are opaque identifiers;
+// neither reveals PII.  systemDB MUST be the BYPASSRLS connection; it MUST NOT
+// be used for any other purpose.
 func (s *Service) findDeliveriesByProviderAndHash(providerMsgID, emailHash string) ([]EmailDelivery, error) {
-	// Scaffold: this method is a stub that returns empty until the privileged
-	// DB accessor is wired.  The query is shown for review; actual DB execution
-	// is deferred to the production wiring step.
-	//
-	// Production query (executed outside WithinTenant / without RLS):
-	//
-	//   SELECT id, tenant_id, notification_id, to_email_hash, provider,
-	//          provider_message_id, status, attempts, max_attempts,
-	//          last_error, sent_at, bounced_at, created_at, updated_at
-	//   FROM email_deliveries
-	//   WHERE provider_message_id = $1 AND to_email_hash = $2
-	//   LIMIT 10
-	//
-	_ = providerMsgID
-	_ = emailHash
-	slog.Info("notification: findDeliveriesByProviderAndHash: scaffold stub — no DB wired",
-		"provider_message_id_prefix", safePrefix(providerMsgID, 12),
-	)
-	return nil, nil
+	if s.systemDB == nil {
+		// systemDB not wired — log and return empty (safe degraded mode).
+		slog.Warn("notification: findDeliveriesByProviderAndHash: systemDB not configured; webhook bounce lookup skipped",
+			"provider_message_id_prefix", safePrefix(providerMsgID, 12),
+		)
+		return nil, nil
+	}
+
+	var deliveries []EmailDelivery
+	// Execute on systemDB (BYPASSRLS connection) — no WithinTenant wrapper.
+	// Query uses placeholder parameters only (no string concatenation).
+	result := s.systemDB.Raw(
+		`SELECT id, tenant_id, notification_id, to_email_hash,
+		        provider, provider_message_id, status, attempts, max_attempts,
+		        last_error, sent_at, bounced_at, created_at, updated_at
+		 FROM email_deliveries
+		 WHERE provider_message_id = ? AND to_email_hash = ?
+		 LIMIT 10`,
+		providerMsgID, emailHash,
+	).Scan(&deliveries)
+	if result.Error != nil {
+		return nil, fmt.Errorf("notification: findDeliveriesByProviderAndHash: %w", result.Error)
+	}
+	return deliveries, nil
 }
 
 // ---------------------------------------------------------------------------
