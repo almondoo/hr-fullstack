@@ -284,7 +284,34 @@ The exact database role design depends on the target deployment (#9).
 
 ---
 
-## Legal Note
+## Legal Note — 労働基準法による法定保存期間
+
+> **免責**: 以下に記載する保存期間・条文の解釈は、一次法令源との突合により確認した
+> 情報ですが、**社会保険労務士（社労士）または弁護士による一次法令源との確認が前提**
+> です。本ドキュメントは法的助言ではありません。
+
+### 労働基準法第109条(記録の保存)
+
+労働者名簿・賃金台帳・出勤簿・雇入・解雇・災害補償・賃金に関する書類等の
+法定保存期間は以下のとおりです。
+
+| 期間 | 根拠 | 備考 |
+|---|---|---|
+| **原則5年** | 労基法第109条(令和2年4月1日改正後) | 現行条文の規定値 |
+| **当面の実務統制値: 3年** | 労基法附則第143条第1項の経過措置 | 「当分の間」3年とみなす旨の経過措置。2026年時点も有効、廃止時期未定 |
+
+出典:
+- 厚生労働省 <https://www.mhlw.go.jp/content/000617980.pdf>
+- 厚生労働省スタートアップ労働条件 <https://www.startup-roudou.mhlw.go.jp/qa/zigyonushi/syuugyoukisoku/q6.html>
+- e-Gov 労働基準法 第109条・附則第143条 <https://laws.e-gov.go.jp/law/322AC0000000049>
+
+### 本システムの設計方針
+
+- **デフォルト保持期間は3年**（現行の経過措置に対応）とする。
+- **将来の5年化**（経過措置廃止後）に備え、保持閾値は設定値(configuration)で
+  管理する設計とする。コードはすでに閾値を運用設定に委譲しており、この設計を追認する。
+- 経過措置の廃止が告示された時点で、設定値を3年→5年へ更新し、本ドキュメントを
+  改訂すること。
 
 All retention-period thresholds, disposal methods, and grace periods controlled
 by this job are **configuration values** (not hardcoded).  Before enabling the

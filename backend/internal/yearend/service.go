@@ -636,32 +636,53 @@ func CalculateTax(in TaxInput) TaxResult {
 	}
 }
 
-// computeIncomeTax applies the 所得税速算表 brackets.
-// PLACEHOLDER: these brackets are approximate 2024-tax-year values and MUST be
-// confirmed/updated from yearend_settings.rate_table_json per annual revision.
-// This function is NOT legal advice.
+// computeIncomeTax applies the 所得税速算表 (超過累進税率) brackets.
+//
+// 出典: 国税庁 No.2260 所得税の税率
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm
+//
+// 令和6年分・令和7年分ともに速算表の境界値・税率・控除額は不変(確認済み)。
+// 注: 速算表だけでは最終所得税額にならない。以下を別途加算すること:
+//   - 復興特別所得税 = 基準所得税額 × 2.1%(2013–2037年適用、CalculateTax で計上済み)
+//   - 令和7年以後の超高所得者サーチャージ(課税所得330百万円超部分)は別建て(未実装)
+//
+// TODO(legal/reiwa7): 令和7年度税制改正(施行=令和7年12月1日、令和7年分以後適用)で
+//
+//	以下のロジックが年度依存になる。完全実装は別issueで対応すること:
+//	  1. 基礎控除: 合計所得金額に応じた段階制(132万以下=95万/132万超336万以下=88万/
+//	     336万超489万以下=68万/489万超655万以下=63万/655万超2350万以下=58万)。
+//	     中間層上乗せは令和7・8年分のみの時限措置(令和9以後は一律58万に戻る)。
+//	     出典: 国税庁 https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+//	           国税庁 No.1199 https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm
+//	  2. 給与所得控除の最低保障額: 令和6以前55万 → 令和7以後65万。
+//	  3. 扶養親族・同一生計配偶者の合計所得要件: 令和6以前48万 → 令和7以後58万。
+//	     出典: 国税庁 No.1191 https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm
+//	  4. 住民税は別実装(計算式・控除上限が所得税と異なる)。本関数は所得税のみ。
+//
+// 前提: この実装は法的助言ではありません。実運用前に社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が必要です。
 func computeIncomeTax(taxableIncome int64) int64 {
-	// 速算表 (超過累進税率)
-	// 課税所得      税率  控除額
-	// ~1,950,000    5%       0
-	// ~3,300,000   10%   97,500
-	// ~6,950,000   20%  427,500
-	// ~9,000,000   23%  636,000
-	// ~18,000,000  33% 1,536,000
-	// ~40,000,000  40% 2,796,000
-	// >40,000,000  45% 4,796,000
+	// 所得税速算表 (令和6・令和7年分 — 国税庁 No.2260 より)
+	// 課税所得(円)             税率  控除額(円)
+	//      1,000 〜  1,949,000   5%          0
+	//  1,950,000 〜  3,299,000  10%     97,500
+	//  3,300,000 〜  6,949,000  20%    427,500
+	//  6,950,000 〜  8,999,000  23%    636,000
+	//  9,000,000 〜 17,999,000  33%  1,536,000
+	// 18,000,000 〜 39,999,000  40%  2,796,000
+	// 40,000,000 以上           45%  4,796,000
 	switch {
-	case taxableIncome <= 1_950_000:
+	case taxableIncome <= 1_949_000:
 		return taxableIncome * 5 / 100
-	case taxableIncome <= 3_300_000:
+	case taxableIncome <= 3_299_000:
 		return taxableIncome*10/100 - 97_500
-	case taxableIncome <= 6_950_000:
+	case taxableIncome <= 6_949_000:
 		return taxableIncome*20/100 - 427_500
-	case taxableIncome <= 9_000_000:
+	case taxableIncome <= 8_999_000:
 		return taxableIncome*23/100 - 636_000
-	case taxableIncome <= 18_000_000:
+	case taxableIncome <= 17_999_000:
 		return taxableIncome*33/100 - 1_536_000
-	case taxableIncome <= 40_000_000:
+	case taxableIncome <= 39_999_000:
 		return taxableIncome*40/100 - 2_796_000
 	default:
 		return taxableIncome*45/100 - 4_796_000
