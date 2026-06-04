@@ -62,6 +62,21 @@ type OIDCConfig struct {
 	// is recommended to prevent token confusion across applications sharing
 	// the same IdP tenant.
 	AllowedAudiences []string
+
+	// ExpectedTenantID is the Azure AD / Entra ID tenant GUID that must appear
+	// in the "tid" claim of every ID token when this application is registered
+	// as a multi-tenant app (issuer contains "common" or "organizations").
+	//
+	// SECURITY: When set, HandleCallback verifies BOTH:
+	//   1. id_token["tid"] == ExpectedTenantID  (exact, case-insensitive)
+	//   2. id_token.Issuer contains ExpectedTenantID  (defence-in-depth)
+	// An ID token from a different tenant is rejected with ErrInvalidAssertion
+	// even when its signature is valid against the IdP's public keys.
+	//
+	// Leave empty for:
+	//   - Single-tenant Entra ID apps (issuer already encodes the tenant ID).
+	//   - Google / Okta (the "tid" claim is not issued by these providers).
+	ExpectedTenantID string
 }
 
 // SAMLConfig holds the configuration required to act as a SAML 2.0 Service

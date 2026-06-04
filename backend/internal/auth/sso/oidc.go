@@ -249,6 +249,11 @@ func (p *OIDCProviderImpl) HandleCallback(ctx context.Context, idp IdentityProvi
 		// Entra ID: "groups" claim (object IDs) or "roles" app role assignments.
 		Groups []string `json:"groups"`
 		Roles  []string `json:"roles"` // Entra ID app role assignments
+
+		// tid is the Azure AD / Entra ID tenant identifier.
+		// Present only in Entra ID tokens; absent in Google / Okta tokens.
+		// Used for multi-tenant cross-tenant replay prevention (see below).
+		TID string `json:"tid"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return UserClaims{}, fmt.Errorf("%w: extract claims: %s", ErrInvalidAssertion, err)
@@ -256,6 +261,45 @@ func (p *OIDCProviderImpl) HandleCallback(ctx context.Context, idp IdentityProvi
 
 	if claims.Sub == "" {
 		return UserClaims{}, fmt.Errorf("%w: sub claim is empty", ErrInvalidAssertion)
+	}
+
+	// --- Entra ID multi-tenant tid / iss verification ---
+	//
+	// SECURITY: In a multi-tenant Entra ID application the issuer URL uses
+	// "common" or "organizations" as the tenant placeholder:
+	//   https://login.microsoftonline.com/common/v2.0
+	// This means go-oidc's built-in issuer check does NOT bind the token to a
+	// specific tenant. An attacker in Tenant B could obtain a valid token from
+	// Tenant B's users and replay it against this application (registered in
+	// Tenant A) if the "tid" claim is not explicitly verified.
+	//
+	// When OIDCConfig carries an ExpectedTenantID (loaded from
+	// OIDC_EXPECTED_TENANT_ID env var) we:
+	//  1. Check that claims.TID equals the expected tenant GUID.
+	//  2. Check that the token issuer URL contains the expected tenant GUID
+	//     (defence-in-depth: catches issuer URL mismatches from other tenants).
+	//
+	// References:
+	//   https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference
+	//   https://learn.microsoft.com/en-us/entra/identity-platform/howto-convert-app-to-be-multi-tenant
+	if idp.OIDCConfig != nil && idp.OIDCConfig.ExpectedTenantID != "" {
+		expectedTID := strings.TrimSpace(idp.OIDCConfig.ExpectedTenantID)
+		if claims.TID == "" {
+			return UserClaims{}, fmt.Errorf("%w: tid claim is missing — required for multi-tenant Entra ID validation", ErrInvalidAssertion)
+		}
+		if !strings.EqualFold(claims.TID, expectedTID) {
+			// Do not include the actual tid value in the error to avoid
+			// leaking cross-tenant information in logs/responses.
+			return UserClaims{}, fmt.Errorf("%w: tid claim does not match expected tenant", ErrInvalidAssertion)
+		}
+		// Defence-in-depth: the issuer URL must contain the expected tenant ID.
+		// For Entra ID single-tenant apps the issuer is:
+		//   https://login.microsoftonline.com/{tenant-id}/v2.0
+		// For common-endpoint multi-tenant apps the go-oidc library resolves
+		// the discovered issuer at construction time; we still check here.
+		if !strings.Contains(idToken.Issuer, expectedTID) {
+			return UserClaims{}, fmt.Errorf("%w: issuer does not contain expected tenant ID", ErrInvalidAssertion)
+		}
 	}
 
 	groups := append(claims.Groups, claims.Roles...)

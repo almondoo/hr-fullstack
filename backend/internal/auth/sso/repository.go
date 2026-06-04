@@ -283,6 +283,30 @@ func (s *StateStore) Consume(ctx context.Context, tenantID uuid.UUID, state stri
 	return
 }
 
+// CleanupExpired deletes all sso_state rows whose expires_at is in the past.
+//
+// Design notes:
+//   - db must be the raw *gorm.DB (hr_app role, NOBYPASSRLS) passed directly
+//     by the maintenance command. This method intentionally bypasses
+//     tenantdb.WithinTenant because sso_state expiry is a system-level sweep
+//     that must cover all tenants in one pass, matching the pattern used by
+//     cmd/retention.
+//   - The WHERE clause uses a parameterised placeholder for the timestamp —
+//     no string-concatenation SQL injection risk.
+//   - The function is idempotent; running it multiple times is safe.
+//
+// Returns the number of deleted rows and any error.
+func CleanupExpiredStates(ctx context.Context, db *gorm.DB) (int64, error) {
+	result := db.WithContext(ctx).Exec(
+		`DELETE FROM sso_state WHERE expires_at < ?`,
+		time.Now(),
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("sso: CleanupExpiredStates: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // ---------------------------------------------------------------------------
 // PostgreSQL JITProvisioner
 // ---------------------------------------------------------------------------

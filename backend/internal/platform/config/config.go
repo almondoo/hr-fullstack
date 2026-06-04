@@ -167,6 +167,105 @@ type Config struct {
 	// Example: "10.0.0.0/8,172.16.0.0/12"
 	TrustedProxies string `env:"TRUSTED_PROXIES"`
 
+	// --- SSO / IdP 連携 (issue #11) ---
+	//
+	// OIDC settings are optional: when OIDC_ISSUER_URL or OIDC_CLIENT_ID is
+	// empty the server starts without an OIDC provider (returns HTTP 501).
+	// All secrets must be injected at runtime from a Secret Manager; never
+	// hard-code real values here or in .env files committed to the repository.
+
+	// OIDCIssuerURL is the OpenID Connect issuer discovery URL.
+	// Examples:
+	//   Google:   https://accounts.google.com
+	//   Entra ID: https://login.microsoftonline.com/{tenant-id}/v2.0
+	OIDCIssuerURL string `env:"OIDC_ISSUER_URL"`
+
+	// OIDCClientID is the OAuth2 client identifier issued by the IdP.
+	OIDCClientID string `env:"OIDC_CLIENT_ID"`
+
+	// OIDCClientSecret is the OAuth2 client secret.
+	// SECURITY: load from Secret Manager in production. Never log or commit.
+	OIDCClientSecret string `env:"OIDC_CLIENT_SECRET"`
+
+	// OIDCRedirectURL is the callback URL registered with the IdP.
+	// Must match exactly what is configured in the IdP application settings.
+	// Example: https://app.example.com/api/v1/auth/sso/oidc/callback
+	OIDCRedirectURL string `env:"OIDC_REDIRECT_URL"`
+
+	// OIDCScopes is a comma-separated list of additional OAuth2 scopes
+	// beyond "openid" (which is always included).
+	// Default (when empty): "email,profile"
+	OIDCScopes string `env:"OIDC_SCOPES"`
+
+	// OIDCExpectedAlgorithm is the JWT signing algorithm expected for ID tokens.
+	// Accepted values: RS256 (default), RS384, RS512, ES256, ES384, ES512.
+	// "none" is never accepted (alg-confusion attack defence).
+	OIDCExpectedAlgorithm string `env:"OIDC_EXPECTED_ALGORITHM" envDefault:"RS256"`
+
+	// OIDCExpectedTenantID is the Azure AD / Entra ID tenant ID (GUID) that
+	// must appear in the "tid" claim of every ID token.
+	//
+	// SECURITY (Entra ID multi-tenant): when set, the callback handler MUST
+	// verify that the "tid" claim equals this value AND that the "iss" URL
+	// contains this tenant ID. An ID token from a different tenant is rejected
+	// with ErrInvalidAssertion even when its signature is valid.
+	//
+	// Leave empty for single-tenant Entra configurations where the issuer URL
+	// already encodes the tenant ID, or for Google / Okta where "tid" is not
+	// present.
+	OIDCExpectedTenantID string `env:"OIDC_EXPECTED_TENANT_ID"`
+
+	// SAML SP / IdP settings. Optional: when SAML_SP_ENTITY_ID or SAML_ACS_URL
+	// is empty the server starts without a SAML provider (returns HTTP 501).
+
+	// SAMLSPEntityID is the SP Entity ID (URI) registered with the IdP.
+	SAMLSPEntityID string `env:"SAML_SP_ENTITY_ID"`
+
+	// SAMLIDPMetadataURL is the URL of the IdP SAML metadata document.
+	// Used when static certificate pinning is not preferred.
+	SAMLIDPMetadataURL string `env:"SAML_IDP_METADATA_URL"`
+
+	// SAMLIDPCertificate is the PEM-encoded X.509 signing certificate of the IdP.
+	// Required when SAMLIDPMetadataURL is not set.
+	// SECURITY: load from Secret Manager; never log or commit the real value.
+	SAMLIDPCertificate string `env:"SAML_IDP_CERTIFICATE"`
+
+	// SAMLACSURL is the Assertion Consumer Service endpoint URL.
+	// Example: https://app.example.com/api/v1/auth/sso/saml/acs
+	SAMLACSURL string `env:"SAML_ACS_URL"`
+
+	// SAMLSPPrivateKey is the PEM-encoded RSA private key for signing AuthnRequests.
+	// Optional; required only when the IdP mandates signed requests.
+	// SECURITY: load from Secret Manager; never log or commit the real value.
+	SAMLSPPrivateKey string `env:"SAML_SP_PRIVATE_KEY"`
+
+	// SAMLSPCertificate is the PEM-encoded X.509 certificate corresponding to
+	// SAMLSPPrivateKey. Optional; required when SAMLSPPrivateKey is set.
+	SAMLSPCertificate string `env:"SAML_SP_CERTIFICATE"`
+
+	// SAMLNameIDFormat is the SAML NameID format to request from the IdP.
+	// Default: urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress
+	SAMLNameIDFormat string `env:"SAML_NAME_ID_FORMAT"`
+
+	// SAMLAllowedClockSkewSeconds is the tolerance for assertion
+	// NotBefore/NotOnOrAfter conditions. Default: 30.
+	SAMLAllowedClockSkewSeconds int `env:"SAML_ALLOWED_CLOCK_SKEW_SECONDS" envDefault:"30"`
+
+	// JIT (Just-In-Time) provisioning settings.
+
+	// JITEnabled enables Just-In-Time user provisioning for SSO logins.
+	// When false, only pre-provisioned users may authenticate via SSO.
+	JITEnabled bool `env:"JIT_ENABLED" envDefault:"false"`
+
+	// JITDefaultRole is the application role assigned to JIT-provisioned users
+	// when no role-mapping rule matches. Must be set when JIT_ENABLED=true.
+	JITDefaultRole string `env:"JIT_DEFAULT_ROLE"`
+
+	// JITAllowedEmailDomains is a comma-separated list of email domains
+	// permitted for JIT provisioning. Empty means all domains are allowed.
+	// Example: "example.com,corp.example.com"
+	JITAllowedEmailDomains string `env:"JIT_ALLOWED_EMAIL_DOMAINS"`
+
 	// --- OpenTelemetry (NFR-012) ---
 
 	// OTelEnabled activates OpenTelemetry trace and metric exporters.
@@ -223,6 +322,50 @@ func (c *Config) DSN() string {
 // IsDevelopment reports whether the application is running in development mode.
 func (c *Config) IsDevelopment() bool {
 	return c.AppEnv == "development"
+}
+
+// OIDCEnabled reports whether OIDC configuration is present.
+// Both IssuerURL and ClientID must be non-empty for the provider to be active.
+func (c *Config) OIDCEnabled() bool {
+	return c.OIDCIssuerURL != "" && c.OIDCClientID != ""
+}
+
+// SAMLEnabled reports whether SAML configuration is present.
+// Both SPEntityID and ACSURL must be non-empty for the provider to be active.
+func (c *Config) SAMLEnabled() bool {
+	return c.SAMLSPEntityID != "" && c.SAMLACSURL != ""
+}
+
+// OIDCScopeList parses the comma-separated OIDC_SCOPES env var into a slice.
+// Returns nil when the env var is empty (callers use their own default).
+func (c *Config) OIDCScopeList() []string {
+	if c.OIDCScopes == "" {
+		return nil
+	}
+	parts := strings.Split(c.OIDCScopes, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// JITAllowedEmailDomainList parses the comma-separated JIT_ALLOWED_EMAIL_DOMAINS
+// env var into a slice. Returns nil when the env var is empty.
+func (c *Config) JITAllowedEmailDomainList() []string {
+	if c.JITAllowedEmailDomains == "" {
+		return nil
+	}
+	parts := strings.Split(c.JITAllowedEmailDomains, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.TrimSpace(p); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // AdminDSN returns the PostgreSQL DSN for the admin / migration role.
