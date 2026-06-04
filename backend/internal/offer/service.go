@@ -256,15 +256,29 @@ func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInp
 		return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status adapter: %w", adapterErr)
 	}
 
-	// When completed, persist signed_at and record an audit entry.
+	// When completed, persist signed_at (and backfill retention_expires_on)
+	// and record an audit entry.
 	if status.Status == econtract.SignStatusCompleted && letter.SignedAt == nil && status.SignedAt != nil {
+		// Compute retention expiry using the same logic as IssueLetter:
+		// fetch offer_settings.retention_years outside the transaction (read-only,
+		// no DB write) and derive the expiry via CalcRetentionExpiry.
+		// When settings are absent or RetentionYears == 0, retentionExpiresOn
+		// remains nil — the econtract retention job will skip the row until
+		// settings are configured.
+		var retentionExpiresOn *time.Time
+		if pollSettings, settingsErr := s.GetSettings(ctx, in.TenantID); settingsErr == nil && pollSettings.RetentionYears > 0 {
+			expiry := econtract.CalcRetentionExpiry(*status.SignedAt, pollSettings.RetentionYears)
+			retentionExpiresOn = &expiry
+		}
+
 		writeErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
 			res := tx.Exec(
 				`UPDATE offer_letters
-				 SET    signed_at  = ?,
-				        updated_at = now()
+				 SET    signed_at           = ?,
+				        retention_expires_on = ?,
+				        updated_at          = now()
 				 WHERE  id = ? AND tenant_id = ? AND signed_at IS NULL`,
-				status.SignedAt, in.LetterID, in.TenantID,
+				status.SignedAt, retentionExpiresOn, in.LetterID, in.TenantID,
 			)
 			if res.Error != nil {
 				return fmt.Errorf("offer: poll signing status update: %w", res.Error)
@@ -284,6 +298,7 @@ func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInp
 			return nil, econtract.SignStatus{}, writeErr
 		}
 		letter.SignedAt = status.SignedAt
+		letter.RetentionExpiresOn = retentionExpiresOn
 	}
 
 	return &letter, status, nil
