@@ -285,14 +285,22 @@ func (s *StateStore) Consume(ctx context.Context, tenantID uuid.UUID, state stri
 	return
 }
 
-// CleanupExpired deletes all sso_state rows whose expires_at is in the past.
+// CleanupExpiredStates deletes all sso_state rows whose expires_at is in the past.
+//
+// # BYPASSRLS requirement
+//
+// db MUST be a *gorm.DB opened with the hr_system role (BYPASSRLS), typically
+// via the SYSTEM_DATABASE_URL environment variable.  The sso_state table has
+// ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY.  A connection opened
+// with the hr_app role (NOBYPASSRLS) and no active app.tenant_id session
+// variable will match zero rows — the cleanup becomes a silent no-op and the
+// table grows unboundedly.  Always use a BYPASSRLS connection for this
+// cross-tenant sweep.
 //
 // Design notes:
-//   - db must be the raw *gorm.DB (hr_app role, NOBYPASSRLS) passed directly
-//     by the maintenance command. This method intentionally bypasses
-//     tenantdb.WithinTenant because sso_state expiry is a system-level sweep
-//     that must cover all tenants in one pass, matching the pattern used by
-//     cmd/retention.
+//   - This method intentionally bypasses tenantdb.WithinTenant because sso_state
+//     expiry is a system-level sweep that must cover all tenants in one pass,
+//     matching the pattern used by cmd/retention's all-tenants mode.
 //   - The WHERE clause uses a parameterised placeholder for the timestamp —
 //     no string-concatenation SQL injection risk.
 //   - The function is idempotent; running it multiple times is safe.
