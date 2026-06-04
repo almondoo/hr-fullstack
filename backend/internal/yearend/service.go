@@ -636,6 +636,174 @@ func CalculateTax(in TaxInput) TaxResult {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 年度依存控除ロジック (令和7年度税制改正対応)
+//
+// LEGAL(免責): 以下の関数は法的助言ではありません。実運用前に社会保険労務士・税理士・
+// 弁護士による一次法令源との確認が前提です。
+//
+// 出典:
+//   - 国税庁「令和7年分の基礎控除等の改正について」
+//     https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+//   - 国税庁 No.1199 基礎控除
+//     https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm
+//   - 国税庁 No.1191 配偶者控除
+//     https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm
+// ---------------------------------------------------------------------------
+
+// BasicDeductionForYear returns the 基礎控除額 (yen) for the given tax year and
+// the employee's 合計所得金額 (totalIncome, yen).
+//
+// The step-function introduced by the 令和7年度税制改正 applies to tax years 2025
+// and 2026 (令和7・8年分); the transitional mid-income supplement lapses for 2027
+// onwards (令和9年分以後).
+//
+//	令和6年分以前 (taxYear ≤ 2024):
+//	  ≤ 24,000,000  → 480,000
+//	  ≤ 24,500,000  → 320,000
+//	  ≤ 25,000,000  → 160,000
+//	  > 25,000,000  →       0
+//
+//	令和7・8年分 (taxYear = 2025 or 2026):
+//	  ≤  1,320,000  → 950,000
+//	  ≤  3,360,000  → 880,000
+//	  ≤  4,890,000  → 680,000
+//	  ≤  6,550,000  → 630,000
+//	  ≤ 23,500,000  → 580,000
+//	  > 23,500,000  → 高所得逓減を適用 (下記参照)
+//
+//	令和9年分以後 (taxYear ≥ 2027):
+//	  ≤  1,320,000  → 950,000
+//	  ≤ 23,500,000  → 580,000
+//	  > 23,500,000  → 高所得逓減を適用 (下記参照)
+//
+// 高所得逓減 (令和7以後・2,350万超部分):
+//
+//	TODO(legal/reiwa7-highearner): 令和7分の2,350万超の基礎控除逓減テーブルは
+//	国税庁一次情報での詳細未確認のため、既存の令和6基準(24百万超で320,000/160,000/0)
+//	を暫定適用。正確な令和7の逓減テーブルは一次情報確認後に更新すること。
+//	出典要確認: https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+//
+// LEGAL(免責): この実装は法的助言ではありません。社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が前提です。
+func BasicDeductionForYear(taxYear int, totalIncome int64) int64 {
+	switch {
+	case taxYear <= 2024:
+		// 令和6年分以前: 国税庁 No.1199 準拠(確認済み)
+		switch {
+		case totalIncome <= 24_000_000:
+			return 480_000
+		case totalIncome <= 24_500_000:
+			return 320_000
+		case totalIncome <= 25_000_000:
+			return 160_000
+		default:
+			return 0
+		}
+
+	case taxYear <= 2026:
+		// 令和7・8年分: 国税庁「令和7年分の基礎控除等の改正について」準拠(確認済み)
+		// 中間層上乗せは時限措置(令和7・8年分のみ)。
+		switch {
+		case totalIncome <= 1_320_000:
+			return 950_000
+		case totalIncome <= 3_360_000:
+			return 880_000
+		case totalIncome <= 4_890_000:
+			return 680_000
+		case totalIncome <= 6_550_000:
+			return 630_000
+		case totalIncome <= 23_500_000:
+			return 580_000
+		default:
+			// TODO(legal/reiwa7-highearner): 2,350万超の令和7基礎控除逓減テーブルは
+			// 国税庁一次情報での詳細未確認。既存令和6の高所得逓減を暫定適用。
+			// 出典要確認: https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+			return basicDeductionHighIncomeR6Compat(totalIncome)
+		}
+
+	default:
+		// 令和9年分以後 (taxYear >= 2027):
+		// 中間層上乗せ解消。132万以下=95万、132万超23,500,000以下=58万。
+		// TODO(legal/reiwa9): 令和9年分の詳細は国税庁一次情報での確認が必要。
+		// 現時点では令和7改正の「最終形」として実装(中間層上乗せ解消の方向性のみ確認)。
+		// 出典要確認: https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+		switch {
+		case totalIncome <= 1_320_000:
+			return 950_000
+		case totalIncome <= 23_500_000:
+			return 580_000
+		default:
+			// TODO(legal/reiwa7-highearner): 同上 — 2,350万超の逓減テーブルは未確認。
+			return basicDeductionHighIncomeR6Compat(totalIncome)
+		}
+	}
+}
+
+// basicDeductionHighIncomeR6Compat applies the pre-R7 high-income taper for
+// total income exceeding 23,500,000 yen as a temporary fallback.
+//
+// TODO(legal/reiwa7-highearner): 令和7年分の2,350万超の基礎控除逓減テーブルは
+// 国税庁一次情報での詳細未確認のため暫定適用。令和6基準(24百万超での段階)を流用。
+func basicDeductionHighIncomeR6Compat(totalIncome int64) int64 {
+	// Reuse pre-R7 taper brackets: 24M → 320k, 24.5M → 160k, 25M+ → 0.
+	// These thresholds originated from No.1199 (令和6以前) and are applied here
+	// ONLY as a temporary stand-in until the authoritative R7 taper is confirmed.
+	switch {
+	case totalIncome <= 24_000_000:
+		return 320_000
+	case totalIncome <= 24_500_000:
+		return 160_000
+	default:
+		return 0
+	}
+}
+
+// EmploymentDeductionMinimum returns the 給与所得控除の最低保障額 (yen) for the
+// given tax year.
+//
+//	令和6年分以前 (taxYear ≤ 2024): 550,000
+//	令和7年分以後 (taxYear ≥ 2025): 650,000
+//
+// NOTE: この関数は最低保障額のみを返す。給与所得控除全体の上限・各区分の令和7改正詳細は
+// 国税庁一次情報での確認が必要なため、最低保障額の切替のみ実装。
+// TODO(legal/reiwa7-employment-deduction): 給与所得控除表全体(各区分・上限)の
+// 令和7改正詳細は一次情報確認後に実装すること。
+// 出典: 国税庁「令和7年分の基礎控除等の改正について」
+// https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+//
+// LEGAL(免責): この実装は法的助言ではありません。社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が前提です。
+func EmploymentDeductionMinimum(taxYear int) int64 {
+	if taxYear >= 2025 {
+		return 650_000 // 令和7年分以後: 65万円
+	}
+	return 550_000 // 令和6年分以前: 55万円
+}
+
+// DependentIncomeLimit returns the 合計所得金額の上限 (yen) used to determine
+// whether a person qualifies as a 控除対象配偶者 or 控除対象扶養親族.
+//
+//	令和元年分以前                (taxYear ≤ 2019): 380,000
+//	令和2〜6年分 (2020 ≤ taxYear ≤ 2024): 480,000
+//	令和7年分以後               (taxYear ≥ 2025): 580,000
+//
+// 出典: 国税庁 No.1191 配偶者控除
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm
+//
+// LEGAL(免責): この実装は法的助言ではありません。社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が前提です。
+func DependentIncomeLimit(taxYear int) int64 {
+	switch {
+	case taxYear >= 2025:
+		return 580_000 // 令和7年分以後: 58万円
+	case taxYear >= 2020:
+		return 480_000 // 令和2〜6年分: 48万円
+	default:
+		return 380_000 // 令和元年分以前: 38万円
+	}
+}
+
 // computeIncomeTax applies the 所得税速算表 (超過累進税率) brackets.
 //
 // 出典: 国税庁 No.2260 所得税の税率
@@ -644,23 +812,19 @@ func CalculateTax(in TaxInput) TaxResult {
 // 令和6年分・令和7年分ともに速算表の境界値・税率・控除額は不変(確認済み)。
 // 注: 速算表だけでは最終所得税額にならない。以下を別途加算すること:
 //   - 復興特別所得税 = 基準所得税額 × 2.1%(2013–2037年適用、CalculateTax で計上済み)
-//   - 令和7年以後の超高所得者サーチャージ(課税所得330百万円超部分)は別建て(未実装)
+//   - 令和7年以後の超高所得者サーチャージ(課税所得330百万円超部分)は別建て未実装。
 //
-// TODO(legal/reiwa7): 令和7年度税制改正(施行=令和7年12月1日、令和7年分以後適用)で
+// TODO(legal/reiwa7-surcharge): 令和7年以後の超高所得者サーチャージ(課税所得3億3千万円
+// 超部分への追加課税)は速算表外の別建て計算が必要。本タスクのスコープ外。
+// 対象年は令和7年分以後(taxYear >= 2025)。一次情報確認後に CalculateTax 内で
+// computeIncomeTax の戻り値に上乗せして実装すること。
+// 出典要確認: 国税庁 No.2260 関連・令和7年度税制改正法令
 //
-//	以下のロジックが年度依存になる。完全実装は別issueで対応すること:
-//	  1. 基礎控除: 合計所得金額に応じた段階制(132万以下=95万/132万超336万以下=88万/
-//	     336万超489万以下=68万/489万超655万以下=63万/655万超2350万以下=58万)。
-//	     中間層上乗せは令和7・8年分のみの時限措置(令和9以後は一律58万に戻る)。
-//	     出典: 国税庁 https://www.nta.go.jp/users/gensen/2025kiso/index.htm
-//	           国税庁 No.1199 https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm
-//	  2. 給与所得控除の最低保障額: 令和6以前55万 → 令和7以後65万。
-//	  3. 扶養親族・同一生計配偶者の合計所得要件: 令和6以前48万 → 令和7以後58万。
-//	     出典: 国税庁 No.1191 https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm
-//	  4. 住民税は別実装(計算式・控除上限が所得税と異なる)。本関数は所得税のみ。
+// TODO(legal/reiwa9): 速算表そのものは令和7・令和9ともに不変(確認済み)。
+// 令和9年以後の制度変更があれば taxYear パラメータを追加して対応すること。
 //
-// 前提: この実装は法的助言ではありません。実運用前に社会保険労務士・税理士・弁護士による
-// 一次法令源との確認が必要です。
+// LEGAL(免責): この実装は法的助言ではありません。社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が前提です。
 func computeIncomeTax(taxableIncome int64) int64 {
 	// 所得税速算表 (令和6・令和7年分 — 国税庁 No.2260 より)
 	// 課税所得(円)             税率  控除額(円)
