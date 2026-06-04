@@ -69,6 +69,7 @@ import (
 	"github.com/your-org/hr-saas/internal/selfservice"
 	"github.com/your-org/hr-saas/internal/talent"
 	"github.com/your-org/hr-saas/internal/workrule"
+	"github.com/your-org/hr-saas/internal/yearend"
 )
 
 // Server holds the gin.Engine and its CSRF-wrapped http.Handler together.
@@ -184,6 +185,11 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		r.Use(corsMiddleware(origins, cfg))
 	}
 	r.Use(httpx.RequestID())
+	// OTel trace + metrics middleware: registers a span and HTTP server metrics
+	// for each request.  Registered after RequestID so the request-ID is
+	// available in the context when the span is started.
+	// When OTel is disabled (no-op providers), this is effectively zero-cost.
+	r.Use(httpx.OTelMiddleware())
 	r.Use(httpx.RequestLogger(logger))
 
 	// --- Health / readiness ---
@@ -292,7 +298,10 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		jobposting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		goal.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		reporting.RegisterRoutes(v1, deps.TenantDB, requireAuth)
-		govfiling.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		// Wire the mynumber provider adapter so govfiling can provide 個人番号
+		// for social-insurance filings (利用提供ログ付き).
+		mnSvc := mynumber.NewService(deps.TenantDB)
+		govfiling.RegisterRoutes(v1, deps.TenantDB, requireAuth, NewMynumberProviderAdapter(mnSvc))
 		ledger.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		billing.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		selfservice.RegisterRoutes(v1, deps.TenantDB, requireAuth)
@@ -305,6 +314,7 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		interview.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		hiring.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 		talent.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		yearend.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 	}
 
 	srv := &Server{engine: r, handler: csrfHandler}

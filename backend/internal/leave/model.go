@@ -73,6 +73,7 @@ type Setting struct {
 	ProportionalTableJSON      []byte    `gorm:"column:proportional_table_json;type:jsonb"`
 	FiveDayObligationThreshold int       `gorm:"column:five_day_obligation_threshold"`
 	ExpiryMonths               int       `gorm:"column:expiry_months"`
+	CreatedAt                  time.Time `gorm:"column:created_at"`
 	UpdatedAt                  time.Time `gorm:"column:updated_at"`
 }
 

@@ -146,6 +146,30 @@ type Config struct {
 	// non-development environments where real client IPs arrive via headers.
 	// Example: "10.0.0.0/8,172.16.0.0/12"
 	TrustedProxies string `env:"TRUSTED_PROXIES"`
+
+	// --- OpenTelemetry (NFR-012) ---
+
+	// OTelEnabled activates OpenTelemetry trace and metric exporters.
+	// Defaults to false; set to true in staging/production once an OTLP
+	// endpoint is provisioned.
+	OTelEnabled bool `env:"OTEL_ENABLED" envDefault:"false"`
+
+	// OTelServiceName is the service.name resource attribute attached to all
+	// spans and metrics.  Defaults to "hr-saas".
+	OTelServiceName string `env:"OTEL_SERVICE_NAME" envDefault:"hr-saas"`
+
+	// OTelExporterOTLPEndpoint is the base URL of the OTLP/HTTP endpoint
+	// (e.g. "https://collector:4318" for an OpenTelemetry Collector, or a
+	// vendor endpoint such as Grafana Cloud / Google Cloud Trace / Datadog).
+	//
+	// Placeholder — inject from a secrets manager in non-development
+	// deployments.  NEVER hard-code a real URL or credentials here.
+	// When empty (the default), OTel remains disabled even if OTEL_ENABLED=true.
+	//
+	// Pending: final exporter target depends on deploy-target decision (GAP-01).
+	// Swap the exporter implementation in internal/platform/otel/otel.go once
+	// the cloud provider is selected.
+	OTelExporterOTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
 }
 
 // Load reads Config from environment variables.

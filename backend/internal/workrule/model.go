@@ -136,6 +136,9 @@ func (Acknowledgement) TableName() string { return "work_rule_acknowledgements" 
 // LinkedLaborAgreementID references attendance.labor_agreements(id) — the //nolint:misspell // DB table name is schema contract
 // source of truth for 36協定 upper-limit values.  This package never duplicates
 // those limit values; it only stores the document/version/filing/validity meta.
+//
+// GovFilingID references gov_filings(id) once InitiateEGovFiling has been
+// called (Issue #21 足場).  NULL until the e-Gov filing flow is initiated.
 type LaborAgreementDocument struct { //nolint:misspell // type name matches DB table (schema contract)
 	ID                     uuid.UUID  `gorm:"column:id;primaryKey"`
 	TenantID               uuid.UUID  `gorm:"column:tenant_id"`
@@ -150,9 +153,13 @@ type LaborAgreementDocument struct { //nolint:misspell // type name matches DB t
 	DocumentRef            *string    `gorm:"column:document_ref"`
 	LinkedLaborAgreementID *uuid.UUID `gorm:"column:linked_labor_agreement_id"` //nolint:misspell // DB column name is schema contract
 	RenewalAlertAt         *time.Time `gorm:"column:renewal_alert_at"`
-	CreatedBy              *uuid.UUID `gorm:"column:created_by"`
-	CreatedAt              time.Time  `gorm:"column:created_at"`
-	UpdatedAt              time.Time  `gorm:"column:updated_at"`
+	// GovFilingID links to gov_filings(id) once InitiateEGovFiling is called.
+	// NULL until the 36協定 e-Gov filing flow is initiated (Issue #21 足場).
+	// Composite FK (govfiling_id, tenant_id) → gov_filings(id, tenant_id).
+	GovFilingID *uuid.UUID `gorm:"column:govfiling_id"`
+	CreatedBy   *uuid.UUID `gorm:"column:created_by"`
+	CreatedAt   time.Time  `gorm:"column:created_at"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at"`
 }
 
 // TableName maps LaborAgreementDocument to the labour_agreement_documents table. //nolint:misspell // type name matches DB schema

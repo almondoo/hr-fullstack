@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/your-org/hr-saas/internal/notification"
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
@@ -228,6 +229,19 @@ func submitInTx(tx *gorm.DB, tenantID, actorID uuid.UUID, ip *string, department
 	}); err != nil {
 		return fmt.Errorf("approval: submit audit: %w", err)
 	}
+
+	// Outbox hook: notify the requester that their request was submitted.
+	// recipient = requester (actorID); resource is the approval_request row.
+	if err := notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+		TenantID:        tenantID,
+		EventType:       "approval.pending",
+		ActorUserID:     &actorID,
+		RecipientUserID: actorID,
+		ResourceType:    "approval_request",
+		ResourceID:      &req.ID,
+	}); err != nil {
+		return fmt.Errorf("approval: submit outbox: %w", err)
+	}
 	return nil
 }
 
@@ -415,6 +429,28 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (*ApprovalRequest,
 			IP:           in.IP,
 		}); err != nil {
 			return fmt.Errorf("approval: decide audit: %w", err)
+		}
+
+		// Outbox hook: notify the original requester that a decision was made.
+		// recipient = requester; event_type reflects the decision outcome.
+		outboxEventType := "approval.decided"
+		switch in.Decision {
+		case DecisionApproved:
+			outboxEventType = "approval.approved"
+		case DecisionRejected:
+			outboxEventType = "approval.rejected"
+		case DecisionReturned:
+			outboxEventType = "approval.returned"
+		}
+		if err := notification.InsertOutbox(tx, notification.InsertOutboxEntry{
+			TenantID:        in.TenantID,
+			EventType:       outboxEventType,
+			ActorUserID:     &in.ActorID,
+			RecipientUserID: req.RequestedByUserID,
+			ResourceType:    "approval_request",
+			ResourceID:      &req.ID,
+		}); err != nil {
+			return fmt.Errorf("approval: decide outbox: %w", err)
 		}
 		return nil
 	}); err != nil {

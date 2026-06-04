@@ -183,3 +183,207 @@ export async function apiMe(
     ok: true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Attendance types
+// ---------------------------------------------------------------------------
+
+export interface AttendanceRecord {
+  id: string;
+  tenant_id: string;
+  employee_id: string;
+  work_date: string;
+  clock_in: string | null;
+  clock_out: string | null;
+  break_minutes: number;
+  work_minutes: number;
+  overtime_minutes: number;
+  source: string;
+  note: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AttendanceListResponse {
+  records: AttendanceRecord[];
+}
+
+export interface CreateAttendanceRecordPayload {
+  employee_id: string;
+  work_date: string;
+  clock_in?: string | null;
+  clock_out?: string | null;
+  break_minutes: number;
+  source: string;
+  note?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Attendance endpoints
+// ---------------------------------------------------------------------------
+
+export async function apiListAttendanceRecords(
+  incomingCookie: string | null,
+  params: { employee_id: string; from: string; to: string },
+): Promise<ApiResponse<AttendanceListResponse>> {
+  const url = new URL(`${API_URL}/api/v1/attendance/records`);
+  url.searchParams.set("employee_id", params.employee_id);
+  url.searchParams.set("from", params.from);
+  url.searchParams.set("to", params.to);
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: buildHeaders(incomingCookie),
+  });
+
+  if (!res.ok) {
+    return {
+      data: null,
+      status: res.status,
+      setCookieHeaders: extractSetCookies(res),
+      ok: false,
+    };
+  }
+
+  const data = (await res.json()) as AttendanceListResponse;
+  return {
+    data,
+    status: res.status,
+    setCookieHeaders: extractSetCookies(res),
+    ok: true,
+  };
+}
+
+export async function apiCreateAttendanceRecord(
+  incomingCookie: string | null,
+  payload: CreateAttendanceRecordPayload,
+): Promise<ApiResponse<AttendanceRecord>> {
+  const { token, setCookieHeaders: csrfCookies } =
+    await fetchCsrfToken(incomingCookie);
+
+  const res = await fetch(`${API_URL}/api/v1/attendance/records`, {
+    method: "POST",
+    headers: buildHeaders(incomingCookie, { "X-CSRF-Token": token }),
+    body: JSON.stringify(payload),
+  });
+
+  const allSetCookies = [...csrfCookies, ...extractSetCookies(res)];
+
+  if (!res.ok) {
+    return {
+      data: null,
+      status: res.status,
+      setCookieHeaders: allSetCookies,
+      ok: false,
+    };
+  }
+
+  const data = (await res.json()) as AttendanceRecord;
+  return {
+    data,
+    status: res.status,
+    setCookieHeaders: allSetCookies,
+    ok: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Self-service change request types
+// ---------------------------------------------------------------------------
+
+export interface ChangeRequest {
+  id: string;
+  tenant_id: string;
+  employee_id: string;
+  requested_by_user_id: string;
+  target_type: string;
+  changes: Record<string, unknown>;
+  approval_request_id: string | null;
+  status: string;
+  reflected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChangeRequestListResponse {
+  change_requests: ChangeRequest[];
+}
+
+export interface SubmitChangeRequestPayload {
+  employee_id: string;
+  target_type: string;
+  changes: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Self-service change request endpoints
+// ---------------------------------------------------------------------------
+
+export async function apiListChangeRequests(
+  incomingCookie: string | null,
+  params?: { employee_id?: string; status?: string },
+): Promise<ApiResponse<ChangeRequestListResponse>> {
+  const url = new URL(`${API_URL}/api/v1/selfservice/change-requests`);
+  if (params?.employee_id) {
+    url.searchParams.set("employee_id", params.employee_id);
+  }
+  if (params?.status) {
+    url.searchParams.set("status", params.status);
+  }
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: buildHeaders(incomingCookie),
+  });
+
+  if (!res.ok) {
+    return {
+      data: null,
+      status: res.status,
+      setCookieHeaders: extractSetCookies(res),
+      ok: false,
+    };
+  }
+
+  const data = (await res.json()) as ChangeRequestListResponse;
+  return {
+    data,
+    status: res.status,
+    setCookieHeaders: extractSetCookies(res),
+    ok: true,
+  };
+}
+
+export async function apiSubmitChangeRequest(
+  incomingCookie: string | null,
+  payload: SubmitChangeRequestPayload,
+): Promise<ApiResponse<ChangeRequest>> {
+  const { token, setCookieHeaders: csrfCookies } =
+    await fetchCsrfToken(incomingCookie);
+
+  const res = await fetch(`${API_URL}/api/v1/selfservice/change-requests`, {
+    method: "POST",
+    headers: buildHeaders(incomingCookie, { "X-CSRF-Token": token }),
+    body: JSON.stringify(payload),
+  });
+
+  const allSetCookies = [...csrfCookies, ...extractSetCookies(res)];
+
+  if (!res.ok) {
+    return {
+      data: null,
+      status: res.status,
+      setCookieHeaders: allSetCookies,
+      ok: false,
+    };
+  }
+
+  const data = (await res.json()) as ChangeRequest;
+  return {
+    data,
+    status: res.status,
+    setCookieHeaders: allSetCookies,
+    ok: true,
+  };
+}
