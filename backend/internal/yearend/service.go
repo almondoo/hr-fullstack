@@ -532,15 +532,32 @@ func (s *Service) GetSubmission(ctx context.Context, in GetSubmissionInput) (*Su
 // (rate_table_json / deduction_limits_json) so the formulas are configurable.
 // This implementation is NOT legal advice.
 type TaxInput struct {
+	// TaxYear is the target tax year (対象年) for the year-end adjustment.
+	// It drives year-dependent deduction rules (令和7年度税制改正対応).
+	// When zero, pre-R7 rules (令和6以前) are applied as a safe default.
+	TaxYear int
 	// GrossIncome: 年収 (給与収入金額) in yen.
 	GrossIncome int64
-	// EmploymentDeduction: 給与所得控除 in yen (from rate table).
+	// EmploymentDeduction: 給与所得控除 in yen (caller-supplied, derived from rate table).
+	// CalculateTax enforces the statutory minimum (最低保障額) for the given TaxYear:
+	// 55万 for taxYear ≤ 2024, 65万 for taxYear ≥ 2025.
+	// If the caller supplies a value below the minimum it is raised automatically.
 	EmploymentDeduction int64
-	// BasicDeduction: 基礎控除 in yen (from deduction limits).
-	BasicDeduction int64
 	// DependentDeduction: 扶養控除合計 in yen.
+	// NOTE: the income threshold used to qualify dependents (合計所得要件) is
+	// year-dependent (48万 ≤2024 / 58万 ≥2025).  The threshold check is the
+	// caller's responsibility when building DependentDeduction.
+	// TODO(legal/reiwa7-dependent-wiring): 扶養親族の所得要件判定ロジック
+	// (DependentIncomeLimit を使った合計所得チェック)は本パッケージに未実装。
+	// 扶養申告書の解析・資格判定を実装する際に DependentIncomeLimit(TaxYear)
+	// を使って各扶養親族の合計所得が閾値以下であることを検証すること。
+	// 出典: 国税庁 No.1191 https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm
 	DependentDeduction int64
 	// SpouseDeduction: 配偶者控除 / 配偶者特別控除 in yen.
+	// NOTE: same year-dependent income threshold caveat as DependentDeduction.
+	// TODO(legal/reiwa7-spouse-wiring): 配偶者の所得要件判定に DependentIncomeLimit
+	// を使うこと。現在の実装は呼び出し側が計算済みの控除額を渡す設計のため、
+	// 配偶者資格判定ロジックを実装する際に配線すること。
 	SpouseDeduction int64
 	// LifeInsuranceDeduction: 生命保険料控除 in yen.
 	LifeInsuranceDeduction int64
@@ -577,31 +594,62 @@ type TaxResult struct {
 // CalculateTax computes the year-end adjustment tax result from TaxInput.
 //
 // Formula (simplified statutory flow — requires annual update per 国税庁):
-//  1. 給与所得 = GrossIncome - EmploymentDeduction (給与所得控除)
-//  2. 課税所得 = 給与所得 - 所得控除合計 (千円未満切り捨て)
-//  3. 年税額 = tax(課税所得) × 102.1% (復興特別所得税)
-//  4. 過不足税額 = 年税額 - WithheldTax
+//  1. 給与所得控除の最低保障額を TaxYear に基づき強制適用
+//     (令和6以前=55万、令和7以後=65万 — EmploymentDeductionMinimum)
+//  2. 給与所得 = GrossIncome - EmploymentDeduction (最低保障床適用後)
+//  3. 基礎控除 = BasicDeductionForYear(TaxYear, 給与所得) で自動決定
+//     (令和7・8分は5段階制、令和6以前は従来の逓減制)
+//  4. 課税所得 = 給与所得 - 所得控除合計 (千円未満切り捨て)
+//  5. 年税額 = tax(課税所得) × 102.1% (復興特別所得税)
+//  6. 過不足税額 = 年税額 - WithheldTax
+//
+// 年度依存配線 (令和7年度税制改正対応):
+//   - 基礎控除は TaxInput.BasicDeduction を無視し BasicDeductionForYear で上書き。
+//     年収・扶養の多寡による合計所得の代理値として給与所得(GrossIncome-Employment
+//     Deduction)を使用。給与所得者の場合、給与所得 ≒ 合計所得金額。
+//   - 給与所得控除は最低保障額をサービス層で保証。
+//   - 扶養親族・配偶者の所得要件判定は現状未実装 (TaxInput フィールドの TODO 参照)。
 //
 // LEGAL: rate table and deduction limits MUST be loaded from yearend_settings and
-// confirmed per 国税庁 annual revision.  The constants below are placeholders
-// (the actual values are in yearend_settings.deduction_limits_json /
-// rate_table_json).  This function is NOT legal advice.
+// confirmed per 国税庁 annual revision.  This function is NOT legal advice.
+// 前提: この実装は法的助言ではありません。社会保険労務士・税理士・弁護士による
+// 一次法令源との確認が必要です。
 func CalculateTax(in TaxInput) TaxResult {
-	// 1. 給与所得 = 年収 - 給与所得控除 (non-negative)
-	employmentIncome := in.GrossIncome - in.EmploymentDeduction
+	// 1. 給与所得控除の最低保障額を年度に基づき強制適用。
+	// 令和6以前=55万 / 令和7以後=65万 (EmploymentDeductionMinimum 参照)。
+	// 出典: 国税庁「令和7年分の基礎控除等の改正について」
+	// https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+	//
+	// LEGAL(免責): この実装は法的助言ではありません。
+	empDeduction := in.EmploymentDeduction
+	if minEmp := EmploymentDeductionMinimum(in.TaxYear); empDeduction < minEmp {
+		empDeduction = minEmp
+	}
+
+	// 2. 給与所得 = 年収 - 給与所得控除 (non-negative)
+	employmentIncome := in.GrossIncome - empDeduction
 	if employmentIncome < 0 {
 		employmentIncome = 0
 	}
 
-	// 2. 所得控除合計
-	totalDeductions := in.BasicDeduction +
+	// 3. 基礎控除を年度・合計所得依存で自動決定。
+	// 給与所得者の場合、合計所得金額 ≒ 給与所得 (GrossIncome - EmploymentDeduction)。
+	// 副業所得・一時所得等を考慮する場合は合計所得金額を別途算定して渡すこと。
+	// TaxInput.BasicDeduction は BasicDeductionForYear の結果で上書きされる。
+	// 出典: 国税庁 No.1199 / https://www.nta.go.jp/users/gensen/2025kiso/index.htm
+	//
+	// LEGAL(免責): この実装は法的助言ではありません。
+	basicDeduction := BasicDeductionForYear(in.TaxYear, employmentIncome)
+
+	// 4. 所得控除合計
+	totalDeductions := basicDeduction +
 		in.DependentDeduction +
 		in.SpouseDeduction +
 		in.LifeInsuranceDeduction +
 		in.EarthquakeInsuranceDeduction +
 		in.SocialInsuranceDeduction
 
-	// 3. 課税所得 = 給与所得 - 所得控除合計 (千円未満切り捨て)
+	// 5. 課税所得 = 給与所得 - 所得控除合計 (千円未満切り捨て)
 	taxableIncome := employmentIncome - totalDeductions
 	if taxableIncome < 0 {
 		taxableIncome = 0
@@ -609,7 +657,7 @@ func CalculateTax(in TaxInput) TaxResult {
 	// 千円未満切り捨て (truncate to nearest 1000 yen)
 	taxableIncome = (taxableIncome / 1000) * 1000
 
-	// 4. 所得税額 (速算表 — placeholder rates; load from rate_table_json in production)
+	// 6. 所得税額 (速算表 — 国税庁 No.2260; 令和6・7年分で不変・確認済み)
 	incomeTax := computeIncomeTax(taxableIncome)
 
 	// 住宅借入金等特別控除 (applied after income tax computation)
@@ -618,11 +666,11 @@ func CalculateTax(in TaxInput) TaxResult {
 		incomeTax = 0
 	}
 
-	// 5. 復興特別所得税 = 所得税額 × 2.1%
+	// 7. 復興特別所得税 = 所得税額 × 2.1%
 	// Annual tax = 所得税額 × 102.1% (rounded down)
 	annualTax := incomeTax + (incomeTax * 21 / 1000)
 
-	// 6. 過不足税額
+	// 8. 過不足税額
 	difference := annualTax - in.WithheldTax
 
 	return TaxResult{
@@ -630,7 +678,7 @@ func CalculateTax(in TaxInput) TaxResult {
 		TaxableIncome:       taxableIncome,
 		AnnualTax:           annualTax,
 		Difference:          difference,
-		EmploymentDeduction: in.EmploymentDeduction,
+		EmploymentDeduction: empDeduction,
 		TotalDeductions:     totalDeductions,
 		WithheldTax:         in.WithheldTax,
 	}

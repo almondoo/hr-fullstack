@@ -356,6 +356,9 @@ type runCalculationRequest struct {
 	TaxYear                      int   `json:"tax_year"                         validate:"required,min=2000,max=2100"`
 	GrossIncome                  int64 `json:"gross_income"                     validate:"min=0"`
 	EmploymentDeduction          int64 `json:"employment_deduction"             validate:"min=0"`
+	// BasicDeduction は受け取っても無視されます。基礎控除はサービス層で
+	// BasicDeductionForYear(TaxYear, 給与所得) を使って自動決定されます
+	// (令和7年度税制改正対応)。後方互換のためフィールドは残しています。
 	BasicDeduction               int64 `json:"basic_deduction"                  validate:"min=0"`
 	DependentDeduction           int64 `json:"dependent_deduction"              validate:"min=0"`
 	SpouseDeduction              int64 `json:"spouse_deduction"                 validate:"min=0"`
@@ -435,9 +438,11 @@ func (h *Handler) RunCalculation(c *gin.Context) {
 		EmployeeID: empID,
 		TaxYear:    req.TaxYear,
 		TaxIn: TaxInput{
+			TaxYear:                      req.TaxYear,
 			GrossIncome:                  req.GrossIncome,
 			EmploymentDeduction:          req.EmploymentDeduction,
-			BasicDeduction:               req.BasicDeduction,
+			// BasicDeduction は CalculateTax 内で BasicDeductionForYear により自動決定。
+			// req.BasicDeduction は無視される(後方互換フィールドのみ)。
 			DependentDeduction:           req.DependentDeduction,
 			SpouseDeduction:              req.SpouseDeduction,
 			LifeInsuranceDeduction:       req.LifeInsuranceDeduction,
