@@ -68,6 +68,10 @@ CLAUDE.local.md
 backend/hr-saas
 backend/retention
 
+# --- CJK フォントバイナリ（コミット禁止 / 配置手順は fonts/README.md 参照）---
+# fonts/README.md と fonts/.gitkeep はコミット対象のまま（*.ttf のみ除外）
+backend/internal/yearend/fonts/*.ttf
+
 # --- OS / エディタ ---
 .DS_Store
 Thumbs.db
