@@ -27,6 +27,8 @@ package govfiling
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -87,7 +89,8 @@ type EGovRealConfig struct {
 //
 // Until then, use NewEGovStubSubmitter() (the current default).
 type eGovRealAdapter struct {
-	cfg EGovRealConfig
+	cfg    EGovRealConfig
+	client *http.Client
 }
 
 // NewEGovRealAdapter constructs the real e-Gov adapter from the given config.
@@ -109,11 +112,19 @@ func NewEGovRealAdapter(cfg EGovRealConfig) (EGovSubmitter, error) {
 	if cfg.ClientSecret == "" {
 		return nil, fmt.Errorf("govfiling: NewEGovRealAdapter: ClientSecret is required (set EGOV_CLIENT_SECRET)")
 	}
-	// TODO(real-egov): HTTP クライアント初期化.
-	// - net/http.Client + TLS 設定 (InsecureSkipVerify は NEVER true).
-	// - OAuth2 / APIキー認証フロー実装.
-	// - タイムアウト・リトライポリシー設定.
-	return &eGovRealAdapter{cfg: cfg}, nil
+
+	// HTTP client with TLS verification enabled (InsecureSkipVerify MUST remain
+	// false; disabling certificate validation is forbidden per security policy).
+	// Timeout prevents hung connections from blocking cleanup goroutines.
+	// TODO(real-egov): OAuth2 transport (token refresh) を Transport に追加する.
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		// net/http's default Transport uses the system trust store and performs
+		// full TLS certificate chain verification. No override is needed here.
+		// Explicitly do NOT set Transport.TLSClientConfig.InsecureSkipVerify.
+	}
+
+	return &eGovRealAdapter{cfg: cfg, client: httpClient}, nil
 }
 
 // SubmitArticle36 submits a 36協定 electronic filing to the e-Gov API.
