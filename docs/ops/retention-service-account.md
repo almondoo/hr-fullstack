@@ -54,13 +54,16 @@ data only** (never real PII):
 ```sql
 -- Run as hr_admin or via a migration/seed script.
 -- Do NOT commit the resulting UUID to the repository.
-INSERT INTO users (id, tenant_id, email, password_hash, role, status)
+--
+-- NOTE: users has no 'role' column.  The role is assigned via role_id FK
+-- (added by migration 00003_auth_rbac_audit.sql).  Insert the user first,
+-- then point role_id at the system_retention role in Step 2.
+INSERT INTO users (id, tenant_id, email, password_hash, status)
 VALUES (
     gen_random_uuid(),
     '<TENANT_UUID>',
     'retention-svc@system.internal',   -- synthetic, non-routable
-    '',                                 -- no password — service account, no login
-    'system_retention',                 -- custom role (see Step 2)
+    NULL,                              -- no password — service account, no login
     'active'
 )
 RETURNING id;  -- capture this UUID as RETENTION_ACTOR_ID
@@ -76,14 +79,38 @@ tenant-agnostic service accounts (check `users.tenant_id` nullability).
 
 ### Step 2 — Assign the minimum RBAC role
 
-Grant only the permissions listed in the table above.  If a dedicated
-`system_retention` role does not exist yet, create it in `internal/platform/auth/rbac.go`
-following the pattern of the existing role definitions, then run the RBAC seed.
+Grant only the permissions listed in the table above.  The `system_retention`
+role name and its permission set are defined in
+`internal/platform/auth/rbac.go` (`RoleSystemRetention`,
+`SystemRetentionPermsJSON`).
+
+First, insert the role row for the tenant (idempotent):
 
 ```sql
--- Example: assign the retention_svc role to the system user within a tenant.
+-- Create the system_retention role row for this tenant (if not already present).
+-- The permissions JSON matches SystemRetentionPermsJSON in rbac.go.
+INSERT INTO roles (id, tenant_id, name, permissions)
+VALUES (
+    gen_random_uuid(),
+    '<TENANT_UUID>',
+    'system_retention',
+    '{"perms":["mynumber:reveal","ledger:write"]}'::jsonb
+)
+ON CONFLICT (tenant_id, name) DO NOTHING;
+```
+
+Then point the service-account user's `role_id` at the new role row:
+
+```sql
+-- Assign the system_retention role to the retention service-account user.
+-- users.role_id is a UUID FK to roles.id (migration 00003_auth_rbac_audit.sql).
 UPDATE users
-SET role = 'system_retention'
+SET role_id = (
+    SELECT id FROM roles
+    WHERE name = 'system_retention'
+      AND tenant_id = '<TENANT_UUID>'
+    LIMIT 1
+)
 WHERE id = '<RETENTION_ACTOR_UUID>'
   AND tenant_id = '<TENANT_UUID>';
 ```
@@ -144,20 +171,114 @@ When `-all-tenants` is used, the binary issues a **direct query** on the
 `tenants` table outside a `WithinTenant` transaction.  This query enumerates
 all active tenant IDs.
 
-This cross-tenant SELECT bypasses the per-tenant RLS policy on `tenants`.  It
-requires the `hr_app` role to have `SELECT` on `tenants` (granted in migration
-00001) and either:
+This cross-tenant SELECT requires bypassing the per-tenant RLS policy on
+`tenants` (which normally restricts `hr_app` to its own row only).
 
-- The `tenants` table RLS policy permits the query (it currently requires
-  `app.tenant_id` to match — so in practice an `hr_admin` / `BYPASSRLS` role
-  is needed for enumeration), OR
-- The database role used for enumeration is granted `BYPASSRLS` on `tenants`
-  only (a narrower privilege than full superuser).
+### hr_retention_enum — dedicated DB role for cross-tenant enumeration
 
-**Recommended**: run the retention binary under a dedicated `hr_retention_enum`
-database role that has `BYPASSRLS` scoped to `tenants` only, and `hr_app`-level
-access (no BYPASSRLS) for all other tables.  This keeps the cross-tenant
-enumeration privilege minimal and separate from row-level operations.
+The retention binary should connect as the `hr_retention_enum` PostgreSQL role
+when running in `-all-tenants` mode.  This role:
+
+- Is **NOSUPERUSER + NOBYPASSRLS** at the role attribute level.
+- Is a **member of `hr_app`** (inherits DML grants on retention-related tables).
+- Has **SELECT on `tenants`** explicitly granted.
+- Is covered by a **permissive RLS policy** on `tenants` (`hr_retention_enum_read_all`)
+  that allows it to read ALL tenant rows — scoped to this role only, leaving the
+  main `tenant_isolation` policy unchanged for all other roles.
+
+This approach is preferred over a blanket `BYPASSRLS` role attribute because it
+limits the enumeration privilege to exactly the one table that needs it.
+
+#### Provisioning
+
+`hr_retention_enum` is created by `backend/db/init/20-create-retention-enum-role.sh`,
+which runs inside Docker during database initialisation (analogous to
+`10-create-app-role.sh` for `hr_app`).
+
+Required environment variable:
+
+```sh
+HR_RETENTION_ENUM_DB_PASSWORD=<strong-random-password>
+```
+
+For non-Docker deployments (bare PostgreSQL), run the equivalent SQL manually
+as a superuser.  The role is **standalone** (no `GRANT hr_app`) and receives
+only the tables/sequences that `job.go` and its service calls actually access:
+
+```sql
+-- 1. Create the role (replace <PASSWORD> with a strong random password)
+CREATE ROLE hr_retention_enum
+    LOGIN
+    PASSWORD '<PASSWORD>'
+    NOSUPERUSER
+    NOBYPASSRLS
+    NOCREATEDB
+    NOCREATEROLE;
+
+-- 2. Schema access
+GRANT USAGE ON SCHEMA public TO hr_retention_enum;
+
+-- 3. Cross-tenant enumeration (tenants table + permissive RLS policy)
+GRANT SELECT ON TABLE tenants TO hr_retention_enum;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE tablename = 'tenants'
+          AND policyname = 'hr_retention_enum_read_all'
+    ) THEN
+        EXECUTE $pol$
+            CREATE POLICY hr_retention_enum_read_all ON tenants
+                AS PERMISSIVE
+                FOR SELECT
+                TO hr_retention_enum
+                USING (true)
+        $pol$;
+    END IF;
+END;
+$$;
+
+-- 4. Per-tenant DML: job-run tracking, audit, RBAC lookup
+GRANT SELECT, INSERT, UPDATE ON TABLE retention_job_runs TO hr_retention_enum;
+GRANT INSERT                 ON TABLE audit_logs         TO hr_retention_enum;
+GRANT USAGE, SELECT ON SEQUENCE audit_logs_seq_seq       TO hr_retention_enum;
+GRANT SELECT ON TABLE roles TO hr_retention_enum;
+GRANT SELECT ON TABLE users TO hr_retention_enum;
+
+-- 5. RunMyNumberDisposal (job.go -> mynumber.Service.Dispose)
+GRANT SELECT, UPDATE ON TABLE mynumber_records     TO hr_retention_enum;
+GRANT INSERT         ON TABLE mynumber_disposals   TO hr_retention_enum;
+GRANT SELECT, INSERT ON TABLE mynumber_access_logs TO hr_retention_enum;
+GRANT SELECT         ON TABLE mynumber_purposes    TO hr_retention_enum;
+GRANT USAGE, SELECT ON SEQUENCE mynumber_access_logs_seq_seq TO hr_retention_enum;
+
+-- 6. RunLedgerRetention
+GRANT SELECT, UPDATE ON TABLE worker_rosters   TO hr_retention_enum;
+GRANT SELECT, UPDATE ON TABLE wage_ledgers     TO hr_retention_enum;
+GRANT SELECT, UPDATE ON TABLE attendance_books TO hr_retention_enum;
+
+-- 7. RunEmployeeDataPolicy
+GRANT SELECT ON TABLE employees            TO hr_retention_enum;
+GRANT SELECT ON TABLE employment_contracts TO hr_retention_enum;
+
+-- 8. RunDocumentExpiry
+GRANT SELECT, UPDATE ON TABLE documents TO hr_retention_enum;
+```
+
+Store the password in the same secret store as `DB_PASSWORD` (AWS Secrets
+Manager / GCP Secret Manager / Kubernetes Secret).  **Never commit the
+password to the repository.**
+
+#### Connection environment variables (all-tenants mode)
+
+When running in `-all-tenants` mode, set `DB_USER=hr_retention_enum` and
+supply the corresponding `DB_PASSWORD`.  Single-tenant mode continues to use
+`DB_USER=hr_app`.
+
+The Kubernetes CronJob example (`infra/jobs/retention-cronjob.yaml`) uses
+`DB_USER: hr_app` as a placeholder — update to `hr_retention_enum` when
+deploying `-all-tenants` runs.
 
 The exact database role design depends on the target deployment (#9).
 
@@ -180,7 +301,11 @@ This document is operational guidance, not legal advice.
 | File | Purpose |
 |------|---------|
 | `backend/cmd/retention/main.go` | Binary entry point; `-all-tenants` flag |
+| `backend/Dockerfile.retention` | Production Docker image for the retention binary |
 | `backend/internal/retention/job.go` | Retention sub-job implementations |
+| `backend/internal/platform/auth/rbac.go` | `RoleSystemRetention` constant and `SystemRetentionPerms` |
+| `backend/db/init/10-create-app-role.sh` | Provisions the `hr_app` database role (Docker init) |
+| `backend/db/init/20-create-retention-enum-role.sh` | Provisions the `hr_retention_enum` database role (Docker init) |
 | `backend/db/migrations/00030_retention_job_state.sql` | `retention_job_runs` table |
 | `backend/db/migrations/00035_ledger_retention_expired.sql` | `retention_expired` column |
 | `infra/jobs/retention-cronjob.yaml` | Kubernetes CronJob example |
