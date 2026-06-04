@@ -297,7 +297,7 @@ func (p *OIDCProviderImpl) HandleCallback(ctx context.Context, idp IdentityProvi
 		//   https://login.microsoftonline.com/{tenant-id}/v2.0
 		// For common-endpoint multi-tenant apps the go-oidc library resolves
 		// the discovered issuer at construction time; we still check here.
-		if !strings.Contains(idToken.Issuer, expectedTID) {
+		if !strings.Contains(strings.ToLower(idToken.Issuer), strings.ToLower(expectedTID)) {
 			return UserClaims{}, fmt.Errorf("%w: issuer does not contain expected tenant ID", ErrInvalidAssertion)
 		}
 	}

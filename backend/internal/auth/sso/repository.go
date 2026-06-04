@@ -76,6 +76,7 @@ type oidcConfigJSON struct {
 	Scopes            []string `json:"scopes"`
 	ExpectedAlgorithm string   `json:"expected_algorithm"`
 	AllowedAudiences  []string `json:"allowed_audiences"`
+	ExpectedTenantID  string   `json:"expected_tenant_id"`
 }
 
 type samlConfigJSON struct {
@@ -190,6 +191,7 @@ func dbRowToIdentityProvider(row dbIdentityProvider) (IdentityProvider, error) {
 			Scopes:            cfg.Scopes,
 			ExpectedAlgorithm: cfg.ExpectedAlgorithm,
 			AllowedAudiences:  cfg.AllowedAudiences,
+			ExpectedTenantID:  cfg.ExpectedTenantID,
 		}
 	case ProtocolSAML:
 		var cfg samlConfigJSON
