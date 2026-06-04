@@ -46,6 +46,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -166,8 +167,9 @@ type sesMail struct {
 //  1. Validate the X-Amz-Sns-Topic-Arn header against cfg.SNSTopicARN.
 //  2. Parse the SNS envelope.
 //  3. Verify the SNS message signature (fail-closed): fetch the signing cert by
-//     SigningCertURL (SSRF-guarded to *.amazonaws.com only), then verify the
-//     RSA-SHA1 signature per the AWS SNS specification.
+//     SigningCertURL (SSRF-guarded to the exact sns.<region>.amazonaws.com host
+//     and /SimpleNotificationService-*.pem path, redirects disabled), then
+//     verify the RSA-SHA1 signature per the AWS SNS specification.
 //  4. For SubscriptionConfirmation: log the SubscribeURL for manual confirmation
 //     (auto-confirm is a security risk — an operator must visit the URL).
 //  5. For Notification: parse the SES event and call MarkBounced per recipient.
@@ -239,7 +241,9 @@ func (h *BounceWebhookHandler) HandleSESBounce(c *gin.Context) {
 // verifySNSSignature verifies the RSA-SHA1 signature of an SNS message.
 //
 // Algorithm (per AWS docs):
-//  1. Validate SigningCertURL host ends with ".amazonaws.com" (SSRF guard).
+//  1. Validate SigningCertURL is the exact SNS cert endpoint
+//     (sns.<region>.amazonaws.com host + /SimpleNotificationService-*.pem path)
+//     with redirects disabled on the fetch (SSRF guard).
 //  2. Fetch the PEM certificate from the validated URL.
 //  3. Build the canonical string-to-sign from the message fields (type-dependent).
 //  4. Decode the base64 Signature field and verify against the RSA public key.
@@ -262,9 +266,17 @@ func verifySNSSignature(env snsEnvelope) error {
 	if certURL.Scheme != "https" {
 		return fmt.Errorf("sns: SigningCertURL must use https")
 	}
+	// Validate against the exact SNS signing-cert endpoint, not any
+	// *.amazonaws.com host: an attacker who can host content on any
+	// amazonaws.com subdomain (e.g. an S3 bucket like evil.s3.amazonaws.com)
+	// could otherwise serve a forged signing certificate and bypass signature
+	// verification entirely.
 	host := certURL.Hostname()
-	if !strings.HasSuffix(host, ".amazonaws.com") {
-		return fmt.Errorf("sns: SigningCertURL host %q is not *.amazonaws.com", host)
+	if !snsCertHostRe.MatchString(host) {
+		return fmt.Errorf("sns: SigningCertURL host %q is not an SNS signing endpoint", host)
+	}
+	if !strings.HasPrefix(certURL.Path, "/SimpleNotificationService-") || !strings.HasSuffix(certURL.Path, ".pem") {
+		return fmt.Errorf("sns: SigningCertURL path %q is not a valid SNS cert path", certURL.Path)
 	}
 
 	// Fetch the signing certificate (bounded response, short timeout).
@@ -364,10 +376,21 @@ func snsStringToSign(env snsEnvelope) string {
 	return b.String()
 }
 
+// snsCertHostRe matches the exact host AWS uses for SNS signing certificates:
+// sns.<region>.amazonaws.com.  A loose ".amazonaws.com" suffix check is
+// insufficient (see verifySNSSignature for the bypass it would allow).
+var snsCertHostRe = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com$`)
+
 // snsHTTPClient is a dedicated HTTP client for fetching SNS signing certificates.
-// It uses a short timeout and is separate from httpClient to allow independent
-// tuning.
-var snsHTTPClient = &http.Client{Timeout: 5 * time.Second}
+// It uses a short timeout and disables redirect-following (CheckRedirect returns
+// ErrUseLastResponse) so a 3xx from the allowlisted host cannot redirect the
+// fetch to an attacker-controlled location and punch through the SSRF allowlist.
+var snsHTTPClient = &http.Client{
+	Timeout: 5 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // processSESNotification routes a parsed SES bounce/complaint message to the
 // delivery status update logic.
