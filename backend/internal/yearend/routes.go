@@ -17,6 +17,8 @@ import (
 //
 //	GET    /yearend/settings                                       — yearend:read
 //	PUT    /yearend/settings                                       — yearend:write
+//	POST   /yearend/reports/summary-return                        — yearend:write  (法定調書合計表)
+//	GET    /yearend/reports/summary-return                        — yearend:read
 //	POST   /employees/:id/yearend/submissions                      — yearend:write
 //	POST   /employees/:id/yearend/submissions/submit               — yearend:write
 //	GET    /employees/:id/yearend/submissions                      — yearend:read  (reveal=true → yearend:reveal)
@@ -42,6 +44,10 @@ func RegisterRoutes(rg *gin.RouterGroup, tdb *tenantdb.TenantDB, requireAuth gin
 	ye.Use(requireAuth)
 	ye.GET("/settings", read, h.GetSettings)
 	ye.PUT("/settings", write, h.UpsertSettings)
+
+	// Summary return (法定調書合計表) — tenant-level, spans all employees.
+	ye.POST("/reports/summary-return", write, h.GenerateSummaryReturn)
+	ye.GET("/reports/summary-return", read, h.GetSummaryReturnReports)
 
 	// --- Per-employee yearend routes ---
 	empYE := rg.Group("/employees/:id/yearend")

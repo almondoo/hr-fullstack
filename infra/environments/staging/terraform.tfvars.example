@@ -1,0 +1,9 @@
+# terraform.tfvars.example — ステージング環境
+# cp terraform.tfvars.example terraform.tfvars して実値を入力すること。
+# terraform.tfvars は .gitignore 済み。実値をコミットしないこと。
+
+region               = "ap-northeast-1"
+image_tag            = "replace-with-commit-sha"
+image_repository_url = "REPLACE_WITH_ECR_REPOSITORY_URL"
+certificate_arn      = null
+additional_kms_admins = []

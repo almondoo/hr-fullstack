@@ -1,0 +1,63 @@
+# ===========================================================================
+# systemd service unit — hr-retention
+# ===========================================================================
+# PURPOSE:
+#   Defines the one-shot service that systemd executes when the timer fires.
+#   Pair with retention-timer.timer (OnCalendar).
+#
+# STATUS:
+#   EXAMPLE ONLY — real deployment wiring depends on #9 (デプロイ先決定).
+#   Adapt User, WorkingDirectory, EnvironmentFile, ExecStart, and
+#   StandardOutput/StandardError to the target host.
+#
+# PREREQUISITES (operator checklist):
+#   1. Build and install the retention binary:
+#        go build -o /usr/local/bin/hr-retention ./cmd/retention
+#   2. Create the environment file at /etc/hr-saas/retention.env
+#      with the required variables (see EnvironmentFile below).
+#      IMPORTANT: restrict permissions to root-readable only:
+#        chmod 600 /etc/hr-saas/retention.env
+#   3. See docs/ops/retention-service-account.md for actor provisioning.
+#
+# INSTALL:
+#   cp retention-timer.service /etc/systemd/system/hr-retention.service
+#   cp retention-timer.timer   /etc/systemd/system/hr-retention.timer
+#   systemctl daemon-reload
+#   systemctl enable --now hr-retention.timer
+# ===========================================================================
+[Unit]
+Description=HR SaaS — data retention and disposal job (all tenants)
+Documentation=https://github.com/your-org/hr-saas/blob/main/docs/ops/retention-service-account.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hr-retention            # dedicated non-root system user
+Group=hr-retention
+
+# Environment variables: DB_PASSWORD, RETENTION_ACTOR_ID, etc.
+# File must be owned by root, mode 600.  Never hardcode secrets here.
+EnvironmentFile=/etc/hr-saas/retention.env
+
+ExecStart=/usr/local/bin/hr-retention \
+    -all-tenants \
+    -disposal-method=ciphertext_deleted
+    # Add -employee-grace-days=<N> after 社労士/弁護士 review.
+
+# Logging: send both stdout and stderr to the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hr-retention
+
+# Timeout: 90 minutes for a full all-tenants sweep.
+TimeoutStartSec=5400
+
+# Security hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/log/hr-saas    # adjust if the binary writes local logs
+
+[Install]
+WantedBy=multi-user.target

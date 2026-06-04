@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +119,72 @@ func TestModelTableNames(t *testing.T) {
 	assert.Equal(t, "yearend_calculations", Calculation{}.TableName())
 	assert.Equal(t, "yearend_reports", Report{}.TableName())
 	assert.Equal(t, "yearend_payroll_pushes", PayrollPush{}.TableName())
+}
+
+// ---------------------------------------------------------------------------
+// PDF rendering (no DB required)
+// ---------------------------------------------------------------------------
+
+// TestRenderWithholdingSlipPDF verifies that a non-empty valid PDF is produced.
+func TestRenderWithholdingSlipPDF(t *testing.T) {
+	r := CalculateTax(TaxInput{
+		GrossIncome:              5_000_000,
+		EmploymentDeduction:      1_440_000,
+		BasicDeduction:           480_000,
+		SocialInsuranceDeduction: 714_000,
+		WithheldTax:              150_000,
+	})
+	// Synthetic employee ID — no real PII.
+	empID, err := uuid.Parse("00000000-0000-0000-0000-000000000001")
+	require.NoError(t, err)
+
+	pdfBytes, err := renderWithholdingSlipPDF(empID, 2026, r)
+	require.NoError(t, err)
+	assert.Greater(t, len(pdfBytes), 0, "PDF output must be non-empty")
+	// PDF files start with the %PDF magic bytes.
+	assert.True(t, len(pdfBytes) >= 4 && string(pdfBytes[:4]) == "%PDF",
+		"output must start with %%PDF magic bytes")
+}
+
+// TestRenderSummaryReturnPDF verifies that a non-empty valid PDF is produced.
+func TestRenderSummaryReturnPDF(t *testing.T) {
+	sr := SummaryReturn{
+		TenantID:      "00000000-0000-0000-0000-000000000002",
+		TaxYear:       2026,
+		EmployeeCount: 3,
+		TotalGross:    15_000_000,
+		TotalTax:      900_000,
+		TotalWithheld: 750_000,
+		TotalDiff:     150_000,
+	}
+
+	pdfBytes, err := renderSummaryReturnPDF(sr)
+	require.NoError(t, err)
+	assert.Greater(t, len(pdfBytes), 0, "PDF output must be non-empty")
+	assert.True(t, len(pdfBytes) >= 4 && string(pdfBytes[:4]) == "%PDF",
+		"output must start with %%PDF magic bytes")
+}
+
+// TestRenderSummaryReturnCSV verifies CSV structure for a synthetic tenant.
+func TestRenderSummaryReturnCSV(t *testing.T) {
+	sr := SummaryReturn{
+		TenantID:      "00000000-0000-0000-0000-000000000003",
+		TaxYear:       2026,
+		EmployeeCount: 2,
+		TotalGross:    10_000_000,
+		TotalTax:      600_000,
+		TotalWithheld: 500_000,
+		TotalDiff:     100_000,
+	}
+
+	csvBytes, err := renderSummaryReturnCSV(sr)
+	require.NoError(t, err)
+	require.True(t, json.Valid([]byte(`"test"`))) // import sanity only
+
+	csvStr := string(csvBytes)
+	assert.Contains(t, csvStr, "tenant_id")
+	assert.Contains(t, csvStr, "employee_count")
+	assert.Contains(t, csvStr, "2")  // EmployeeCount
+	assert.Contains(t, csvStr, "2026")
+	assert.Contains(t, csvStr, "10000000")
 }

@@ -22,10 +22,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,7 @@ import (
 	"github.com/gin-contrib/cors"
 	ginsecure "github.com/gin-contrib/secure"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/csrf"
 	"github.com/ulule/limiter/v3"
 	limitergin "github.com/ulule/limiter/v3/drivers/middleware/gin"
@@ -43,6 +46,7 @@ import (
 	"github.com/your-org/hr-saas/internal/approval"
 	"github.com/your-org/hr-saas/internal/attendance"
 	internalauth "github.com/your-org/hr-saas/internal/auth"
+	"github.com/your-org/hr-saas/internal/auth/sso"
 	"github.com/your-org/hr-saas/internal/billing"
 	"github.com/your-org/hr-saas/internal/department"
 	"github.com/your-org/hr-saas/internal/employee"
@@ -61,6 +65,7 @@ import (
 	"github.com/your-org/hr-saas/internal/oneonone"
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
+	"github.com/your-org/hr-saas/internal/platform/crypto"
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/httpx"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
@@ -107,6 +112,32 @@ type Deps struct {
 	// SessionStore provides session lifecycle operations.
 	// Required to enable auth routes.
 	SessionStore *platformauth.SessionStore
+
+	// FieldCipher is the AES-256-GCM cipher used to encrypt / decrypt sensitive
+	// PII columns (マイナンバー, 口座番号, etc.).
+	//
+	// Construct via crypto.NewFieldCipherFromProvider, passing a KeyProvider
+	// obtained from crypto.NewKeyProviderFromConfig.  The key provider is
+	// selected by KEY_PROVIDER in config (default: "env", production: "aws-kms").
+	//
+	// Injection point: cmd/server/main.go or the integration test setup should
+	// build the FieldCipher before calling server.New and pass it here.
+	// See docs/key_rotation.md for the full key lifecycle.
+	//
+	// When nil, domain handlers that require field-level encryption will
+	// return a startup error (fail-closed); do not deploy with nil in production.
+	FieldCipher *crypto.FieldCipher
+
+	// MetricsHandler is the Prometheus scrape http.Handler returned by
+	// platformotel.Init.  When non-nil it is mounted at GET /metrics so that
+	// Prometheus / CloudWatch agent can scrape SDK metrics (HTTP server
+	// request duration, active requests, Go runtime, process stats, and any
+	// domain-specific meters).
+	//
+	// Access to /metrics should be restricted at the infrastructure layer
+	// (e.g. security-group / ALB listener rule) so it is not publicly reachable.
+	// When nil (unit tests without OTel), the /metrics route is omitted.
+	MetricsHandler http.Handler
 }
 
 // New constructs a configured *gin.Engine AND its CSRF-wrapped http.Handler,
@@ -197,6 +228,20 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 	r.GET("/healthz", healthzHandler())
 	r.GET("/readyz", readyzHandler(deps.AppDB))
 
+	// --- Prometheus metrics scrape endpoint ---
+	// Mounts the OTel SDK Prometheus exporter at GET /metrics.
+	// Access MUST be restricted at the infrastructure layer (security group /
+	// ALB listener rule) — this endpoint is not authenticated and must not be
+	// publicly reachable in production.
+	// When MetricsHandler is nil (unit tests without OTel init), the route is
+	// omitted so existing tests continue to pass without changes.
+	if deps.MetricsHandler != nil {
+		h := deps.MetricsHandler
+		r.GET("/metrics", func(c *gin.Context) {
+			h.ServeHTTP(c.Writer, c.Request)
+		})
+	}
+
 	// --- CSRF protection ---
 	// gorilla/csrf wraps the entire *gin.Engine as an http.Handler.
 	// We produce the csrf.Protect middleware and apply it at the engine level.
@@ -269,7 +314,47 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		authGroup.POST("/logout", requireAuth, func(c *gin.Context) { authSvc.Logout(c) })
 		authGroup.GET("/me", requireAuth, func(c *gin.Context) { authSvc.Me(c) })
 
-		// --- Department routes ---
+			// --- SSO routes ---
+			// OIDC and SAML providers are nil until credentials are provisioned.
+			// The service returns HTTP 501 when the provider is not configured,
+			// so the server starts cleanly without IdP credentials.
+			ssoSvc := sso.NewService(
+				nil, // oidcProvider: inject sso.NewOIDCProvider(...) once credentials are available
+				nil, // samlProvider: inject sso.NewSAMLProvider(...) once credentials are available
+				sso.NewPGProviderRepository(deps.TenantDB),
+				sso.NewStateStore(deps.TenantDB),
+				sso.NewPGJITProvisioner(deps.TenantDB),
+				deps.SessionStore,
+				deps.TenantDB,
+				cfg,
+			)
+			ssoGroup := authGroup.Group("/sso")
+			// OIDC: GET /api/v1/auth/sso/oidc/:idp_id → redirect to IdP
+			ssoGroup.GET("/oidc/:idp_id", func(c *gin.Context) { ssoSvc.StartOIDC(c) })
+			// OIDC callback: GET /api/v1/auth/sso/oidc/callback
+			ssoGroup.GET("/oidc/callback", func(c *gin.Context) { ssoSvc.CallbackOIDC(c) })
+			// SAML: GET /api/v1/auth/sso/saml/:idp_id → redirect to IdP
+			ssoGroup.GET("/saml/:idp_id", func(c *gin.Context) { ssoSvc.StartSAML(c) })
+			// SAML ACS: POST /api/v1/auth/sso/saml/acs
+			//
+			// CSRF EXEMPTION (security note):
+			// The SAML ACS endpoint receives a POST directly from the IdP's browser
+			// redirect with a SAMLResponse form field.  The IdP does not include a
+			// gorilla/csrf CSRF token; applying CSRF protection here would break all
+			// SAML login flows.  The exemption is scoped to this single route only —
+			// all other POST/PUT/PATCH/DELETE routes remain CSRF-protected.
+			//
+			// Alternative mitigations ensure this route is not CSRF-exploitable:
+			//   - The SAMLResponse is cryptographically signed by the IdP; any
+			//     cross-site request without a valid assertion is rejected by
+			//     ssoSvc.ACSSAML (HandleCallback verifies the signature).
+			//   - The RelayState / authnRequestID is server-generated and consumed
+			//     once (replay protection in StateStore).
+			//   - SameSite=Lax on the session cookie prevents the session from being
+			//     set by a cross-site top-level navigation without a real assertion.
+			ssoGroup.POST("/saml/acs", csrfExempt(), func(c *gin.Context) { ssoSvc.ACSSAML(c) })
+
+			// --- Department routes ---
 		department.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 
 		// --- Employee / assignment / contract routes ---
@@ -289,7 +374,29 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		onboarding.RegisterRoutes(v1, deps.TenantDB, requireAuth)
 
 		// --- Notification platform routes (通知) ---
-		notification.RegisterRoutes(v1, deps.TenantDB, requireAuth)
+		// Build the production MailSender from MAIL_PROVIDER env.
+		notifMailer, notifProviderName := buildMailSender(logger)
+		notification.SetProviderName(notifProviderName)
+
+		// Build optional chat senders from environment variables.
+		// Senders are only constructed when the required env vars are non-empty.
+		// SECURITY: Webhook URLs and tokens are secrets; they are read from env
+		// variables only and are NEVER logged, committed, or written to DB.
+		chatSenders := buildChatSenders(logger)
+
+		// Build the notification Service with the real mailer, system DB
+		// (BYPASSRLS for bounce webhooks), and chat senders.
+		notifSvc := notification.NewServiceFull(deps.TenantDB, notifMailer, deps.AppDB, chatSenders...)
+		notification.RegisterRoutes(v1, deps.TenantDB, requireAuth,
+			notification.WithService(notifSvc))
+
+		// --- Bounce / complaint webhook routes (unauthenticated; SNS / SendGrid) ---
+		// These routes are intentionally placed outside the CSRF wrapper because
+		// AWS SNS and SendGrid call them directly without session cookies.
+		// They are registered on the raw gin.Engine (r), not on the v1 group.
+		webhooksGroup := r.Group("/webhooks")
+		bounceCfg := buildBounceWebhookConfig(logger)
+		notification.RegisterBounceRoutes(webhooksGroup, deps.TenantDB, deps.AppDB, notifMailer, bounceCfg)
 
 		// --- My Number routes (マイナンバー) ---
 		mynumber.RegisterRoutes(v1, deps.TenantDB, requireAuth)
@@ -507,6 +614,261 @@ func csrfAuthKey(cfg *config.Config) []byte {
 		panic("server: CSRF_AUTH_KEY is not valid hex: " + err.Error())
 	}
 	return key
+}
+
+// buildMailSender constructs a MailSender and returns the provider name from
+// MAIL_PROVIDER (valid values: "ses", "sendgrid", "mock").  On configuration
+// errors the function logs a warning and falls back to MockSender so the
+// server starts cleanly.  The returned providerName is the canonical string
+// written to email_deliveries.provider rows.
+//
+// SECURITY: API keys / credentials are read from environment variables only
+// and are NEVER logged, committed, or written to persistent storage.
+func buildMailSender(logger *slog.Logger) (notification.MailSender, string) {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("MAIL_PROVIDER")))
+
+	switch provider {
+	case "ses":
+		cfg := notification.SESConfig{
+			Region:          os.Getenv("AWS_REGION"),
+			FromAddress:     os.Getenv("NOTIFICATION_SES_FROM_ADDRESS"),
+			AccessKeyID:     os.Getenv("NOTIFICATION_SES_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("NOTIFICATION_SES_SECRET_ACCESS_KEY"),
+		}
+		sender, err := notification.NewSESSender(cfg)
+		if err != nil {
+			logger.Warn("server: SES mail sender misconfigured; falling back to mock",
+				"error", err.Error(),
+			)
+			return notification.MockSender{}, "mock"
+		}
+		logger.Info("server: mail provider: ses",
+			"region", cfg.Region,
+			"from_address", cfg.FromAddress,
+		)
+		return sender, "ses"
+
+	case "sendgrid":
+		cfg := notification.SendGridConfig{
+			APIKey:      os.Getenv("NOTIFICATION_SENDGRID_API_KEY"),
+			FromAddress: os.Getenv("NOTIFICATION_SENDGRID_FROM_ADDRESS"),
+		}
+		sender, err := notification.NewSendGridSender(cfg)
+		if err != nil {
+			logger.Warn("server: SendGrid mail sender misconfigured; falling back to mock",
+				"error", err.Error(),
+			)
+			return notification.MockSender{}, "mock"
+		}
+		logger.Info("server: mail provider: sendgrid",
+			"from_address", cfg.FromAddress,
+		)
+		return sender, "sendgrid"
+
+	default:
+		if provider != "" && provider != "mock" {
+			logger.Warn("server: unknown MAIL_PROVIDER value; using mock",
+				"value", provider,
+			)
+		} else {
+			logger.Info("server: mail provider: mock (development)")
+		}
+		return notification.MockSender{}, "mock"
+	}
+}
+
+// buildChatSenders constructs the enabled chat senders from environment variables.
+//
+// Each sender is only built when the minimum required env vars are present.
+// Misconfigured senders log a warning and are skipped (fail-open for chat so
+// email / in-app delivery is never blocked by a missing chat credential).
+//
+// SECURITY: all env var values treated as secrets are NEVER logged.
+// The function logs only channel names and non-PII configuration metadata.
+//
+// Environment variables used:
+//
+//	Slack:      NOTIFICATION_SLACK_WEBHOOK_URL
+//	Teams:      NOTIFICATION_TEAMS_WEBHOOK_URL
+//	LINE WORKS (pre-issued token mode):
+//	            NOTIFICATION_LINE_WORKS_BOT_ID
+//	            NOTIFICATION_LINE_WORKS_CHANNEL_ID
+//	            NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN
+//	LINE WORKS (Service Account / OAuth2 mode):
+//	            NOTIFICATION_LINE_WORKS_BOT_ID
+//	            NOTIFICATION_LINE_WORKS_CHANNEL_ID
+//	            NOTIFICATION_LINE_WORKS_CLIENT_ID
+//	            NOTIFICATION_LINE_WORKS_SERVICE_ACCOUNT_ID
+//	            NOTIFICATION_LINE_WORKS_PRIVATE_KEY
+func buildChatSenders(logger *slog.Logger) []notification.ChatSender {
+	var senders []notification.ChatSender
+
+	// --- Slack ---
+	if slackURL := os.Getenv("NOTIFICATION_SLACK_WEBHOOK_URL"); slackURL != "" {
+		sender, err := notification.NewSlackSender(notification.SlackConfig{
+			WebhookURL: slackURL,
+		})
+		if err != nil {
+			logger.Warn("server: Slack chat sender misconfigured; skipping",
+				"error", err.Error(),
+			)
+		} else {
+			logger.Info("server: chat sender enabled: slack")
+			senders = append(senders, sender)
+		}
+	}
+
+	// --- Microsoft Teams ---
+	if teamsURL := os.Getenv("NOTIFICATION_TEAMS_WEBHOOK_URL"); teamsURL != "" {
+		sender, err := notification.NewTeamsSender(notification.TeamsConfig{
+			WebhookURL: teamsURL,
+		})
+		if err != nil {
+			logger.Warn("server: Teams chat sender misconfigured; skipping",
+				"error", err.Error(),
+			)
+		} else {
+			logger.Info("server: chat sender enabled: teams")
+			senders = append(senders, sender)
+		}
+	}
+
+	// --- LINE WORKS ---
+	// Two modes:
+	//   (a) Pre-issued token: NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN is set.
+	//   (b) Service Account OAuth2: CLIENT_ID + SERVICE_ACCOUNT_ID + PRIVATE_KEY
+	//       are set — LineWorksTokenProvider fetches and caches tokens at runtime.
+	lwBotID := os.Getenv("NOTIFICATION_LINE_WORKS_BOT_ID")
+	lwChannelID := os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_ID")
+	if lwBotID != "" && lwChannelID != "" {
+		lwToken := os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN")
+		if lwToken == "" {
+			// Service Account mode: derive a token via OAuth2.
+			lwToken = buildLineWorksOAuth2Token(logger)
+		}
+		if lwToken != "" {
+			sender, err := notification.NewLineWorksSender(notification.LineWorksConfig{
+				BotID:        lwBotID,
+				ChannelID:    lwChannelID,
+				ChannelToken: lwToken,
+			})
+			if err != nil {
+				logger.Warn("server: LINE WORKS chat sender misconfigured; skipping",
+					"error", err.Error(),
+				)
+			} else {
+				logger.Info("server: chat sender enabled: line_works")
+				senders = append(senders, sender)
+			}
+		} else {
+			logger.Warn("server: LINE WORKS bot/channel IDs configured but no token source available; skipping",
+				"bot_id_set", lwBotID != "",
+				"channel_id_set", lwChannelID != "",
+			)
+		}
+	}
+
+	if len(senders) == 0 {
+		logger.Info("server: no chat senders configured (set NOTIFICATION_SLACK_WEBHOOK_URL, " +
+			"NOTIFICATION_TEAMS_WEBHOOK_URL, or LINE WORKS env vars to enable)")
+	}
+	return senders
+}
+
+// buildLineWorksOAuth2Token attempts to obtain a LINE WORKS access token via
+// the Service Account JWT Client Credentials flow.  It returns the token string
+// on success, or empty string on failure (after logging the error).
+//
+// This is called once at startup; the returned token is passed to
+// NewLineWorksSender as the initial ChannelToken.  For long-running processes a
+// production deployment should periodically refresh the token (e.g. via a
+// background goroutine or by integrating LineWorksTokenProvider directly into
+// LineWorksSender).
+//
+// SECURITY: the private key is read from the env variable and is never logged.
+func buildLineWorksOAuth2Token(logger *slog.Logger) string {
+	clientID := os.Getenv("NOTIFICATION_LINE_WORKS_CLIENT_ID")
+	saID := os.Getenv("NOTIFICATION_LINE_WORKS_SERVICE_ACCOUNT_ID")
+	privKey := os.Getenv("NOTIFICATION_LINE_WORKS_PRIVATE_KEY")
+	if clientID == "" || saID == "" || privKey == "" {
+		return ""
+	}
+	provider, err := notification.NewLineWorksTokenProvider(notification.LineWorksServiceAccountConfig{
+		ClientID:         clientID,
+		ServiceAccountID: saID,
+		PrivateKeyPEM:    privKey,
+	})
+	if err != nil {
+		logger.Warn("server: LINE WORKS token provider construction failed; skipping",
+			"error", err.Error(),
+		)
+		return ""
+	}
+	// Fetch a token synchronously at startup (short timeout to avoid blocking).
+	// context.Background is acceptable here — startup is sequential.
+	token, err := provider.Token(context.Background())
+	if err != nil {
+		logger.Warn("server: LINE WORKS initial token fetch failed; skipping sender",
+			"error", err.Error(),
+		)
+		return ""
+	}
+	return token
+}
+
+// buildBounceWebhookConfig reads bounce/complaint webhook configuration from
+// environment variables.
+//
+// SECURITY: SendGridWebhookSigningKey is treated as a secret and is NEVER
+// logged.
+func buildBounceWebhookConfig(logger *slog.Logger) notification.BounceWebhookConfig {
+	cfg := notification.BounceWebhookConfig{
+		SNSTopicARN:               os.Getenv("NOTIFICATION_SES_SNS_TOPIC_ARN"),
+		SendGridWebhookSigningKey: os.Getenv("NOTIFICATION_SENDGRID_WEBHOOK_SIGNING_KEY"),
+	}
+
+	actorIDStr := os.Getenv("NOTIFICATION_WEBHOOK_ACTOR_ID")
+	if actorIDStr != "" {
+		parsed, err := uuid.Parse(actorIDStr)
+		if err != nil {
+			logger.Warn("server: NOTIFICATION_WEBHOOK_ACTOR_ID is not a valid UUID; using nil UUID",
+				"error", err.Error(),
+			)
+		} else {
+			cfg.SystemActorID = parsed
+		}
+	}
+
+	if cfg.SNSTopicARN != "" {
+		logger.Info("server: bounce webhook: SNS topic ARN configured",
+			"arn_prefix", cfg.SNSTopicARN[:min(len(cfg.SNSTopicARN), 20)],
+		)
+	}
+	if cfg.SendGridWebhookSigningKey != "" {
+		logger.Info("server: bounce webhook: SendGrid signing key configured")
+	}
+	return cfg
+}
+
+// csrfExempt returns a Gin middleware that marks the current request as exempt
+// from gorilla/csrf token checking.  It calls csrf.UnsafeSkipCheck, which sets
+// a context flag that causes the csrf middleware to pass the request through
+// without a token check.
+//
+// SECURITY: Apply this ONLY to routes that receive unauthenticated POST requests
+// from external parties (e.g. IdP-initiated SAML ACS, SNS webhooks).  Do NOT
+// apply to any route that involves user-initiated state changes — those must
+// remain CSRF-protected.  The routes using this middleware MUST implement their
+// own equivalent of CSRF protection (e.g. cryptographic assertion signature
+// verification for SAML ACS).
+func csrfExempt() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Replace the request in the Gin context with a copy that carries the
+		// gorilla/csrf skip flag.  All subsequent middleware and handlers in this
+		// request lifecycle see the flag and the csrf middleware skips the check.
+		c.Request = csrf.UnsafeSkipCheck(c.Request)
+		c.Next()
+	}
 }
 
 // buildRateLimiter returns a Gin middleware that limits requests per IP.

@@ -7,11 +7,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 
 	"github.com/your-org/hr-saas/internal/platform/audit"
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
+
+// employeeTracer is the OTel tracer for domain-level employee operations.
+// No PII (names, emails, employee codes) is recorded in span attributes.
+var employeeTracer = otel.Tracer("github.com/your-org/hr-saas/internal/employee")
 
 // Sentinel errors.
 var (
@@ -89,6 +95,9 @@ type CreateEmployeeInput struct {
 // department belongs to the same tenant before inserting — defence-in-depth
 // on top of the composite FK constraint.
 func (s *Service) CreateEmployee(ctx context.Context, in CreateEmployeeInput) (*Employee, error) {
+	ctx, span := employeeTracer.Start(ctx, "employee.CreateEmployee")
+	defer span.End()
+
 	emp := Employee{
 		ID:             uuid.New(),
 		TenantID:       in.TenantID,
@@ -142,6 +151,7 @@ func (s *Service) CreateEmployee(ctx context.Context, in CreateEmployeeInput) (*
 		}
 		return nil
 	}); err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 

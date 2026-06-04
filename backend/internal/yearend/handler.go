@@ -576,13 +576,23 @@ func (h *Handler) GenerateWithholdingSlip(c *gin.Context) {
 		return
 	}
 
-	if req.Format == ReportFormatCSV && len(content) > 0 {
-		c.Header("Content-Disposition",
-			fmt.Sprintf("attachment; filename=\"withholding_slip_%d.csv\"", req.TaxYear))
-		c.Data(http.StatusOK, "text/csv; charset=utf-8", content)
-		return
+	switch req.Format {
+	case ReportFormatCSV:
+		if len(content) > 0 {
+			c.Header("Content-Disposition",
+				fmt.Sprintf("attachment; filename=\"withholding_slip_%d.csv\"", req.TaxYear))
+			c.Data(http.StatusOK, "text/csv; charset=utf-8", content)
+			return
+		}
+	case ReportFormatPDF:
+		if len(content) > 0 {
+			c.Header("Content-Disposition",
+				fmt.Sprintf("attachment; filename=\"withholding_slip_%d.pdf\"", req.TaxYear))
+			c.Data(http.StatusOK, "application/pdf", content)
+			return
+		}
 	}
-	// PDF scaffold or no inline content: return the report metadata.
+	// Fallback: return the report metadata record.
 	c.JSON(http.StatusCreated, toReportResponse(report))
 }
 
@@ -661,4 +671,85 @@ func (h *Handler) PushToPayroll(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, toPayrollPushResponse(push))
+}
+
+// ---------------------------------------------------------------------------
+// Summary return (法定調書合計表)
+// ---------------------------------------------------------------------------
+
+// SummaryReturnResponse is the JSON representation of a summary return report.
+type SummaryReturnResponse struct {
+	Report  ReportResponse `json:"report"`
+}
+
+// GenerateSummaryReturn handles POST /yearend/reports/summary-return.
+// Aggregates all finalised calculations for the tenant/year and generates the
+// 法定調書合計表 in the requested format.
+// For CSV / PDF: returns the file inline.  Report metadata is also recorded.
+//
+// Security: aggregates amounts from result_json only — no decrypted PII.
+func (h *Handler) GenerateSummaryReturn(c *gin.Context) {
+	tenantID := platformauth.TenantIDFrom(c)
+	actorID := platformauth.UserIDFrom(c)
+
+	var req generateReportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", "invalid JSON")
+		return
+	}
+	if err := validate.Struct(&req); err != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", validationMessage(err))
+		return
+	}
+
+	report, content, err := h.svc.GenerateSummaryReturn(c.Request.Context(), GenerateSummaryReturnInput{
+		TenantID: tenantID,
+		ActorID:  actorID,
+		TaxYear:  req.TaxYear,
+		Format:   req.Format,
+		IP:       clientIP(c),
+	})
+	if mapServiceError(c, err) {
+		return
+	}
+
+	switch req.Format {
+	case ReportFormatCSV:
+		if len(content) > 0 {
+			c.Header("Content-Disposition",
+				fmt.Sprintf("attachment; filename=\"summary_return_%d.csv\"", req.TaxYear))
+			c.Data(http.StatusOK, "text/csv; charset=utf-8", content)
+			return
+		}
+	case ReportFormatPDF:
+		if len(content) > 0 {
+			c.Header("Content-Disposition",
+				fmt.Sprintf("attachment; filename=\"summary_return_%d.pdf\"", req.TaxYear))
+			c.Data(http.StatusOK, "application/pdf", content)
+			return
+		}
+	}
+	c.JSON(http.StatusCreated, toReportResponse(report))
+}
+
+// GetSummaryReturnReports handles GET /yearend/reports/summary-return?tax_year=2026.
+// Returns the list of generated summary return report records for the tenant/year.
+func (h *Handler) GetSummaryReturnReports(c *gin.Context) {
+	tenantID := platformauth.TenantIDFrom(c)
+	taxYear, err := parseTaxYear(c.Query("tax_year"))
+	if err != nil {
+		httpx.RespondError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+
+	reports, err := h.svc.GetSummaryReturnReports(c.Request.Context(), tenantID, taxYear)
+	if mapServiceError(c, err) {
+		return
+	}
+
+	resp := make([]ReportResponse, 0, len(reports))
+	for i := range reports {
+		resp = append(resp, toReportResponse(&reports[i]))
+	}
+	c.JSON(http.StatusOK, resp)
 }

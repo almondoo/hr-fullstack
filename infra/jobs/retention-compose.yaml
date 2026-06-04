@@ -1,0 +1,52 @@
+# ===========================================================================
+# Docker Compose — retention job cron service (local / staging example)
+# ===========================================================================
+# PURPOSE:
+#   Adds a "cron" sidecar to the development docker-compose stack that runs
+#   cmd/retention -all-tenants on a daily schedule using supercronic.
+#
+# STATUS:
+#   EXAMPLE ONLY — real deployment wiring depends on #9 (デプロイ先決定).
+#   This is suitable as a local development smoke-test or lightweight staging
+#   deployment.  For production, prefer the Kubernetes CronJob manifest
+#   (retention-cronjob.yaml) or the systemd timer (retention-timer.service).
+#
+# PREREQUISITES (operator checklist):
+#   1. Build the retention image:
+#        docker build -f backend/Dockerfile.retention -t hr-retention:local backend/
+#   2. Provide the required env vars in .env (copy from .env.example):
+#        RETENTION_ACTOR_ID=<service-account UUID>
+#        HR_APP_DB_PASSWORD=<hr_app role password>
+#   3. See docs/ops/retention-service-account.md for actor provisioning.
+#
+# USAGE:
+#   Merge into docker-compose.yml or run standalone:
+#     docker compose -f docker-compose.yml -f infra/jobs/retention-compose.yaml up retention-cron
+#
+# SECURITY:
+#   - Secrets are sourced from .env (never hardcoded).
+#   - The container runs cmd/retention which connects as hr_app (NOBYPASSRLS).
+# ===========================================================================
+services:
+  retention-cron:
+    image: hr-retention:local    # build from backend/Dockerfile.retention
+    # supercronic runs the crontab inside the container; no root privileges needed.
+    # Install supercronic in Dockerfile.retention — see example comment in that file.
+    command: supercronic /etc/crontabs/retention
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: hr_app
+      DB_PASSWORD: "${HR_APP_DB_PASSWORD:?HR_APP_DB_PASSWORD must be set}"
+      DB_NAME: "${POSTGRES_DB:-hr_saas}"
+      DB_SSLMODE: disable          # use 'require' when TLS is configured
+      RETENTION_ACTOR_ID: "${RETENTION_ACTOR_ID:?RETENTION_ACTOR_ID must be set}"
+      APP_ENV: development
+    # Mount a crontab file that runs the job daily at 02:00.
+    # Adjust the schedule as needed.
+    volumes:
+      - ./infra/jobs/retention-crontab:/etc/crontabs/retention:ro
+    restart: unless-stopped

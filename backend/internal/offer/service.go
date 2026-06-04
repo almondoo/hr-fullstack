@@ -776,7 +776,28 @@ type IssueLetterInput struct {
 // The version is auto-incremented per offer. content_hash records the document
 // hash for tamper detection (truthfulness — CMP-006); signed_at / signer_ref
 // record the signing audit trail. The parent offer must exist in the tenant.
+//
+// When SignedAt is non-nil the retention expiry date is computed via
+// econtract.CalcRetentionExpiry using the tenant's offer_settings.retention_years
+// and stored in retention_expires_on.  This value is consumed by the
+// econtract retention job (RunEContractRetention) to identify expired letters.
+// When offer_settings does not exist for the tenant, retention_expires_on is
+// left NULL — the job will skip such rows until settings are configured.
 func (s *Service) IssueLetter(ctx context.Context, in IssueLetterInput) (*Letter, error) {
+	// Compute retention expiry outside the transaction when SignedAt is provided
+	// (no DB I/O; fail-fast on config read only).
+	var retentionExpiresOn *time.Time
+	if in.SignedAt != nil {
+		settings, settingsErr := s.GetSettings(ctx, in.TenantID)
+		if settingsErr == nil && settings.RetentionYears > 0 {
+			expiry := econtract.CalcRetentionExpiry(*in.SignedAt, settings.RetentionYears)
+			retentionExpiresOn = &expiry
+		}
+		// When settings are absent (ErrSettingNotFound) or RetentionYears == 0,
+		// leave retention_expires_on as NULL.  The letter is still issued; the
+		// retention job will skip it until settings are configured.
+	}
+
 	var letter Letter
 	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
 		// Verify the parent offer belongs to this tenant (defence-in-depth).
@@ -809,26 +830,29 @@ func (s *Service) IssueLetter(ctx context.Context, in IssueLetterInput) (*Letter
 		}
 
 		letter = Letter{
-			ID:              uuid.New(),
-			TenantID:        in.TenantID,
-			OfferID:         in.OfferID,
-			FileRef:         in.FileRef,
-			Version:         nextVersion,
-			EsignProvider:   in.EsignProvider,
-			EsignEnvelopeID: in.EsignEnvelopeID,
-			ContentHash:     in.ContentHash,
-			SignerRef:       in.SignerRef,
-			SignedAt:        in.SignedAt,
+			ID:                 uuid.New(),
+			TenantID:           in.TenantID,
+			OfferID:            in.OfferID,
+			FileRef:            in.FileRef,
+			Version:            nextVersion,
+			EsignProvider:      in.EsignProvider,
+			EsignEnvelopeID:    in.EsignEnvelopeID,
+			ContentHash:        in.ContentHash,
+			SignerRef:          in.SignerRef,
+			SignedAt:           in.SignedAt,
+			RetentionExpiresOn: retentionExpiresOn,
 		}
 
 		if err := tx.Exec(
 			`INSERT INTO offer_letters
 			   (id, tenant_id, offer_id, file_ref, version, esign_provider,
-			    esign_envelope_id, content_hash, signer_ref, signed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			    esign_envelope_id, content_hash, signer_ref, signed_at,
+			    retention_expires_on)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			letter.ID, letter.TenantID, letter.OfferID, letter.FileRef,
 			letter.Version, letter.EsignProvider, letter.EsignEnvelopeID,
 			letter.ContentHash, letter.SignerRef, letter.SignedAt,
+			letter.RetentionExpiresOn,
 		).Error; err != nil {
 			return fmt.Errorf("offer: issue letter insert: %w", err)
 		}

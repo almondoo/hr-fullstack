@@ -1,0 +1,6 @@
+# retention-crontab — used by retention-compose.yaml (supercronic)
+# Runs the retention job daily at 02:00 UTC.
+# Adjust the schedule and flags as needed after 社労士/弁護士 review.
+#
+# Format: min hour dom month dow command
+0 2 * * * /usr/local/bin/retention -all-tenants -disposal-method=ciphertext_deleted

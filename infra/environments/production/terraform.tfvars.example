@@ -1,0 +1,28 @@
+# terraform.tfvars.example — 本番環境
+#
+# このファイルをコピーして terraform.tfvars を作成し、実値を入力すること。
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# NOTE: terraform.tfvars は .gitignore 済み。実値・シークレット・アカウント ID を
+#       このファイルやコードにコミットしないこと (CLAUDE.local.md 厳守)。
+
+# AWS リージョン
+region = "ap-northeast-1"
+
+# クロスリージョンレプリカ先 (DR — #16)
+replica_region = "ap-northeast-3"
+
+# デプロイするコンテナイメージタグ (CI/CD から渡すことを推奨)
+image_tag = "replace-with-commit-sha"
+
+# ECR リポジトリ URL (アカウント ID を含む)
+# 例: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/hr-production-api"
+image_repository_url = "REPLACE_WITH_ECR_REPOSITORY_URL"
+
+# ACM 証明書 ARN (HTTPS リスナー用)
+# 例: "arn:aws:acm:ap-northeast-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+certificate_arn = "REPLACE_WITH_ACM_CERTIFICATE_ARN"
+
+# KMS キー管理者 IAM ARN リスト (DevOps ロール等)
+# 例: ["arn:aws:iam::123456789012:role/DevOpsRole"]
+additional_kms_admins = []

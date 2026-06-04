@@ -61,6 +61,13 @@ frontend/.react-router/
 CLAUDE.local.md
 .claude/settings.local.json
 
+# --- Terraform プロバイダキャッシュ（.terraform.lock.hcl は追跡する）---
+.terraform/
+
+# --- ローカルビルド成果物（Go バイナリ）---
+backend/hr-saas
+backend/retention
+
 # --- OS / エディタ ---
 .DS_Store
 Thumbs.db

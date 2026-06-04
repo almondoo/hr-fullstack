@@ -945,9 +945,13 @@ func (s *Service) GenerateWithholdingSlip(ctx context.Context, in GenerateWithho
 			content = csv
 			contentRef = ""
 		case ReportFormatPDF:
-			// PDF generation scaffold: real PDF generation (pdfcpu / external renderer)
-			// is deferred (P3).  Return a placeholder content_ref.
-			content = nil
+			// Render a real PDF using go-pdf/fpdf.
+			// Security: result contains amounts only — no decrypted PII.
+			pdfBytes, pdfErr := renderWithholdingSlipPDF(in.EmployeeID, in.TaxYear, resultJSON)
+			if pdfErr != nil {
+				return fmt.Errorf("yearend: generate withholding slip PDF: %w", pdfErr)
+			}
+			content = pdfBytes
 			contentRef = fmt.Sprintf("yearend/%d/%s/withholding_slip.pdf", in.TaxYear, in.EmployeeID.String())
 		}
 
@@ -1120,4 +1124,166 @@ func (s *Service) PushToPayroll(ctx context.Context, in PushToPayrollInput) (*Pa
 		return nil, err
 	}
 	return &push, nil
+}
+
+// ---------------------------------------------------------------------------
+// Summary return (法定調書合計表)
+// ---------------------------------------------------------------------------
+
+// GenerateSummaryReturnInput holds fields for generating a 法定調書合計表.
+type GenerateSummaryReturnInput struct {
+	TenantID uuid.UUID
+	ActorID  uuid.UUID
+	TaxYear  int
+	// Format: "csv" or "pdf".
+	Format string
+	IP     *string
+}
+
+// GenerateSummaryReturn aggregates all finalised calculations for the tenant/year
+// and generates the 法定調書合計表.  At least one finalised calculation must exist.
+//
+// Security: aggregates amounts from result_json only — no decrypted PII.
+func (s *Service) GenerateSummaryReturn(ctx context.Context, in GenerateSummaryReturnInput) (*Report, []byte, error) {
+	if in.Format != ReportFormatCSV && in.Format != ReportFormatPDF {
+		return nil, nil, fmt.Errorf("%w: format must be 'csv' or 'pdf'", ErrInvalidInput)
+	}
+
+	var report Report
+	var content []byte
+
+	err := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		// Aggregate finalised calculations.
+		type aggRow struct {
+			EmployeeCount int   `gorm:"column:employee_count"`
+			TotalGross    int64 `gorm:"column:total_gross"`
+			TotalTax      int64 `gorm:"column:total_tax"`
+			TotalWithheld int64 `gorm:"column:total_withheld"`
+			TotalDiff     int64 `gorm:"column:total_diff"`
+		}
+		var agg aggRow
+		if err := tx.Raw(`
+			SELECT
+			    COUNT(*)                                                    AS employee_count,
+			    COALESCE(SUM((result_json->>'gross_income')::bigint),0)    AS total_gross,
+			    COALESCE(SUM((result_json->>'annual_tax')::bigint),0)      AS total_tax,
+			    COALESCE(SUM((result_json->>'withheld_tax')::bigint),0)    AS total_withheld,
+			    COALESCE(SUM((result_json->>'difference')::bigint),0)      AS total_diff
+			FROM yearend_calculations
+			WHERE tenant_id = ? AND tax_year = ? AND status = 'finalised'`,
+			in.TenantID, in.TaxYear,
+		).Scan(&agg).Error; err != nil {
+			return fmt.Errorf("yearend: summary_return aggregate: %w", err)
+		}
+		if agg.EmployeeCount == 0 {
+			return fmt.Errorf("%w: no finalised calculations found for tax year %d",
+				ErrNotFound, in.TaxYear)
+		}
+
+		sr := SummaryReturn{
+			TenantID:      in.TenantID.String(),
+			TaxYear:       in.TaxYear,
+			EmployeeCount: agg.EmployeeCount,
+			TotalGross:    agg.TotalGross,
+			TotalTax:      agg.TotalTax,
+			TotalWithheld: agg.TotalWithheld,
+			TotalDiff:     agg.TotalDiff,
+		}
+
+		var contentRef string
+		switch in.Format {
+		case ReportFormatCSV:
+			csvBytes, err := renderSummaryReturnCSV(sr)
+			if err != nil {
+				return err
+			}
+			content = csvBytes
+			contentRef = ""
+		case ReportFormatPDF:
+			pdfBytes, err := renderSummaryReturnPDF(sr)
+			if err != nil {
+				return fmt.Errorf("yearend: generate summary return PDF: %w", err)
+			}
+			content = pdfBytes
+			contentRef = fmt.Sprintf("yearend/%d/summary_return.pdf", in.TaxYear)
+		}
+
+		id := uuid.New()
+		if err := tx.Exec(
+			`INSERT INTO yearend_reports
+			   (id, tenant_id, employee_id, tax_year, report_type, calc_id, content_ref, format, generated_at)
+			 VALUES (?, ?, NULL, ?, 'summary_return', NULL, ?, ?, now())`,
+			id, in.TenantID, in.TaxYear, contentRef, in.Format,
+		).Error; err != nil {
+			return fmt.Errorf("yearend: summary_return report insert: %w", err)
+		}
+
+		if err := tx.Raw(
+			`SELECT id, tenant_id, employee_id, tax_year, report_type, calc_id,
+			        content_ref, format, generated_at, created_at, updated_at
+			 FROM yearend_reports WHERE id = ? AND tenant_id = ? LIMIT 1`,
+			id, in.TenantID,
+		).Scan(&report).Error; err != nil {
+			return fmt.Errorf("yearend: summary_return report re-read: %w", err)
+		}
+
+		idStr := report.ID.String()
+		return audit.Record(tx, audit.Entry{
+			TenantID:     in.TenantID,
+			UserID:       &in.ActorID,
+			Action:       "yearend_report.summary_return.generated",
+			ResourceType: "yearend_report",
+			ResourceID:   &idStr,
+			IP:           in.IP,
+		})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return &report, content, nil
+}
+
+// renderSummaryReturnCSV renders a 法定調書合計表 as CSV.
+// Output contains aggregate amounts only — no per-employee PII.
+func renderSummaryReturnCSV(sr SummaryReturn) ([]byte, error) {
+	var sb strings.Builder
+	w := csv.NewWriter(&sb)
+	_ = w.Write([]string{
+		"tenant_id", "tax_year", "employee_count",
+		"total_gross_income", "total_annual_tax", "total_withheld_tax", "total_difference",
+	})
+	_ = w.Write([]string{
+		sr.TenantID,
+		fmt.Sprintf("%d", sr.TaxYear),
+		fmt.Sprintf("%d", sr.EmployeeCount),
+		fmt.Sprintf("%d", sr.TotalGross),
+		fmt.Sprintf("%d", sr.TotalTax),
+		fmt.Sprintf("%d", sr.TotalWithheld),
+		fmt.Sprintf("%d", sr.TotalDiff),
+	})
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return nil, fmt.Errorf("yearend: render summary_return csv: %w", err)
+	}
+	return []byte(sb.String()), nil
+}
+
+// GetSummaryReturnReports returns report records for summary_return for the
+// given tenant/year (most recent first).
+func (s *Service) GetSummaryReturnReports(ctx context.Context, tenantID uuid.UUID, taxYear int) ([]Report, error) {
+	var reports []Report
+	err := s.tdb.WithinTenant(ctx, tenantID, func(tx *gorm.DB) error {
+		return tx.Raw(
+			`SELECT id, tenant_id, employee_id, tax_year, report_type, calc_id,
+			        content_ref, format, generated_at, created_at, updated_at
+			 FROM yearend_reports
+			 WHERE tenant_id = ? AND tax_year = ? AND report_type = 'summary_return'
+			 ORDER BY generated_at DESC`,
+			tenantID, taxYear,
+		).Scan(&reports).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return reports, nil
 }

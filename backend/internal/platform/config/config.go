@@ -119,10 +119,30 @@ type Config struct {
 	// key at startup with a warning.  Encrypted values are unreadable after
 	// restart; this is acceptable for local development only.
 	//
-	// TODO: replace with KMS-backed data-key generation for production hardening.
-	// The crypto.FieldCipher interface is stable; swap the LoadKey implementation
-	// in internal/platform/crypto/crypto.go to use GenerateDataKey / Decrypt.
+	// When KeyProvider is "aws-kms", this field is ignored — the DEK is generated
+	// by AWS KMS and never stored here.
 	FieldEncryptionKey string `env:"FIELD_ENCRYPTION_KEY"`
+
+	// KeyProvider selects the field-encryption key backend.
+	// Accepted values:
+	//   "env"     — (default) read key from FIELD_ENCRYPTION_KEY env var.
+	//   "aws-kms" — use AWS KMS envelope encryption; requires KMSKeyID.
+	// Additional providers (GCP Cloud KMS, HashiCorp Vault) may be added without
+	// changing callers; see internal/platform/crypto/keyprovider.go.
+	KeyProvider string `env:"KEY_PROVIDER" envDefault:"env"`
+
+	// KMSKeyID is the full ARN or alias of the AWS KMS Customer Managed Key (CMK)
+	// used as the Key Encryption Key (KEK) when KeyProvider is "aws-kms".
+	// Example: "arn:aws:kms:ap-northeast-1:123456789012:key/mrk-..."
+	//          or "alias/hr-saas-field-encryption"
+	// Required when KEY_PROVIDER=aws-kms; ignored otherwise.
+	// MUST NOT be the real production ARN in committed code — set via env.
+	KMSKeyID string `env:"KMS_KEY_ID"`
+
+	// AWSRegion overrides the AWS region for KMS calls.
+	// When empty, the standard AWS SDK chain is used (AWS_REGION env var,
+	// ~/.aws/config, EC2/ECS metadata).  Prefer the SDK chain in production.
+	AWSRegion string `env:"AWS_REGION"`
 
 	// --- Rate limiting ---
 	// AuthRateLimit is the rate limit for login and signup endpoints.
@@ -306,6 +326,77 @@ func (c *Config) validate() error {
 			"CSRF_AUTH_KEY must be exactly 64 hex characters (32 bytes); got %d characters",
 			len(c.CSRFAuthKey),
 		))
+	}
+
+	// In non-development environments, session keys and the field encryption key
+	// must be explicitly set to prevent running with no key material.
+	//
+	// SessionHashKey: used for HMAC signing of session cookies.
+	// Must be at least 32 bytes (we require exactly 64 hex chars = 32 bytes).
+	if !c.IsDevelopment() && c.SessionHashKey == "" {
+		errs = append(errs, errors.New(
+			"SESSION_HASH_KEY must be set in non-development environments"))
+	}
+	if c.SessionHashKey != "" && len(c.SessionHashKey) != 64 {
+		errs = append(errs, fmt.Errorf(
+			"SESSION_HASH_KEY must be exactly 64 hex characters (32 bytes); got %d characters",
+			len(c.SessionHashKey),
+		))
+	}
+
+	// SessionBlockKey: used for AES encryption of session cookies.
+	// Must be 32 bytes (we require exactly 64 hex chars = 32 bytes for AES-256).
+	if !c.IsDevelopment() && c.SessionBlockKey == "" {
+		errs = append(errs, errors.New(
+			"SESSION_BLOCK_KEY must be set in non-development environments"))
+	}
+	if c.SessionBlockKey != "" && len(c.SessionBlockKey) != 64 {
+		errs = append(errs, fmt.Errorf(
+			"SESSION_BLOCK_KEY must be exactly 64 hex characters (32 bytes); got %d characters",
+			len(c.SessionBlockKey),
+		))
+	}
+
+	// KeyProvider must be one of the accepted values.
+	// Empty string is treated as "env" (the envDefault applies when loaded via
+	// env.Parse; direct struct construction in tests may leave it empty).
+	switch c.KeyProvider {
+	case "", "env", "aws-kms":
+		// valid (empty resolves to "env" at runtime via envDefault tag)
+	default:
+		errs = append(errs, fmt.Errorf(
+			"KEY_PROVIDER %q is not a valid value; accepted: env, aws-kms",
+			c.KeyProvider,
+		))
+	}
+
+	// FieldEncryptionKey: base64-encoded 32-byte AES-256 key for PII column
+	// encryption.  In non-development environments a missing key is fatal —
+	// we must never store PII without a real persistent key.
+	// Length validation: base64-encoding of 32 bytes is 44 characters
+	// (standard encoding with padding).
+	//
+	// When KEY_PROVIDER=aws-kms the plaintext key material comes from KMS and
+	// FIELD_ENCRYPTION_KEY is not required; KMS_KEY_ID is required instead.
+	if c.KeyProvider != "aws-kms" {
+		if !c.IsDevelopment() && c.FieldEncryptionKey == "" {
+			errs = append(errs, errors.New(
+				"FIELD_ENCRYPTION_KEY must be set in non-development environments (or set KEY_PROVIDER=aws-kms)"))
+		}
+		if c.FieldEncryptionKey != "" && len(c.FieldEncryptionKey) != 44 {
+			errs = append(errs, fmt.Errorf(
+				"FIELD_ENCRYPTION_KEY must be exactly 44 base64 characters (32 bytes encoded); got %d characters",
+				len(c.FieldEncryptionKey),
+			))
+		}
+	}
+
+	// When KEY_PROVIDER=aws-kms, KMS_KEY_ID is required so the application
+	// knows which CMK to use.  An empty key ID would cause a runtime error
+	// from the KMS SDK; fail fast here instead.
+	if c.KeyProvider == "aws-kms" && c.KMSKeyID == "" {
+		errs = append(errs, errors.New(
+			"KMS_KEY_ID must be set when KEY_PROVIDER=aws-kms"))
 	}
 
 	// I-7: In non-development environments the CSRF cookie MUST carry the

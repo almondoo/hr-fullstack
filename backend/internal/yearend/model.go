@@ -155,6 +155,23 @@ type Report struct {
 // TableName maps Report to yearend_reports.
 func (Report) TableName() string { return "yearend_reports" }
 
+// SummaryReturn is an in-memory aggregate for generating the 法定調書合計表
+// (summary return) per tenant/year.  It is computed from finalised calculations
+// and is NOT stored as its own DB table — the resulting report row is recorded
+// in yearend_reports with report_type='summary_return'.
+//
+// Security note: amounts are aggregated from result_json (computed values only);
+// no decrypted PII from submissions is included here.
+type SummaryReturn struct {
+	TenantID       string `json:"tenant_id"`
+	TaxYear        int    `json:"tax_year"`
+	EmployeeCount  int    `json:"employee_count"`
+	TotalGross     int64  `json:"total_gross_income"`
+	TotalTax       int64  `json:"total_annual_tax"`
+	TotalWithheld  int64  `json:"total_withheld_tax"`
+	TotalDiff      int64  `json:"total_difference"`
+}
+
 // PayrollPush is the GORM model for yearend_payroll_pushes (給与SaaS連携足場).
 //
 // Security note: ProviderRef is an opaque provider-side reference only.
