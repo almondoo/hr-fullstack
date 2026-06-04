@@ -138,6 +138,29 @@ type Deps struct {
 	// (e.g. security-group / ALB listener rule) so it is not publicly reachable.
 	// When nil (unit tests without OTel), the /metrics route is omitted.
 	MetricsHandler http.Handler
+
+	// SystemDB is a GORM connection for the hr_system role, which holds
+	// BYPASSRLS privilege.  It is used exclusively for cross-tenant queries
+	// that cannot be scoped to a single tenant — specifically the bounce-webhook
+	// delivery lookup (findDeliveriesByProviderAndHash) where no tenant context
+	// is available from the incoming SNS/SendGrid request.
+	//
+	// Source from: SYSTEM_DATABASE_URL environment variable.
+	// Required DSN format: postgres://hr_system:<password>@<host>/<db>?sslmode=...
+	//
+	// Operational prerequisite: the hr_system PostgreSQL role must exist and be
+	// granted BYPASSRLS before this connection can be used.  See
+	// db/migrations/ for role creation (if present) or provision it manually:
+	//   CREATE ROLE hr_system WITH LOGIN BYPASSRLS PASSWORD '...';
+	//   GRANT SELECT ON email_deliveries TO hr_system;
+	//
+	// When nil (SYSTEM_DATABASE_URL not set), bounce cross-tenant lookups log a
+	// warning and return empty results — the server starts normally (safe degrade).
+	//
+	// SECURITY: this connection MUST NOT be used for any purpose other than the
+	// narrow cross-tenant bounce lookup.  All normal tenant-scoped operations
+	// use AppDB/TenantDB.
+	SystemDB *gorm.DB
 }
 
 // New constructs a configured *gin.Engine AND its CSRF-wrapped http.Handler,
@@ -386,7 +409,10 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 
 		// Build the notification Service with the real mailer, system DB
 		// (BYPASSRLS for bounce webhooks), and chat senders.
-		notifSvc := notification.NewServiceFull(deps.TenantDB, notifMailer, deps.AppDB, chatSenders...)
+		// deps.SystemDB may be nil when SYSTEM_DATABASE_URL is not configured;
+		// NewServiceFull accepts nil and degrades safely (bounce lookups log a
+		// warning and return empty results — see Service.findDeliveriesByProviderAndHash).
+		notifSvc := notification.NewServiceFull(deps.TenantDB, notifMailer, deps.SystemDB, chatSenders...)
 		notification.RegisterRoutes(v1, deps.TenantDB, requireAuth,
 			notification.WithService(notifSvc))
 
@@ -396,7 +422,9 @@ func build(cfg *config.Config, deps Deps, logger *slog.Logger) *Server {
 		// They are registered on the raw gin.Engine (r), not on the v1 group.
 		webhooksGroup := r.Group("/webhooks")
 		bounceCfg := buildBounceWebhookConfig(logger)
-		notification.RegisterBounceRoutes(webhooksGroup, deps.TenantDB, deps.AppDB, notifMailer, bounceCfg)
+		// deps.SystemDB (BYPASSRLS) is passed so RegisterBounceRoutes can perform
+		// cross-tenant delivery lookups.  When nil the handler degrades safely.
+		notification.RegisterBounceRoutes(webhooksGroup, deps.TenantDB, deps.SystemDB, notifMailer, bounceCfg)
 
 		// --- My Number routes (マイナンバー) ---
 		mynumber.RegisterRoutes(v1, deps.TenantDB, requireAuth)
@@ -736,28 +764,52 @@ func buildChatSenders(logger *slog.Logger) []notification.ChatSender {
 	// --- LINE WORKS ---
 	// Two modes:
 	//   (a) Pre-issued token: NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN is set.
-	//   (b) Service Account OAuth2: CLIENT_ID + SERVICE_ACCOUNT_ID + PRIVATE_KEY
-	//       are set — LineWorksTokenProvider fetches and caches tokens at runtime.
+	//       The static token is used directly.  No dynamic refresh occurs; rotate
+	//       manually when the token expires.
+	//   (b) Service Account OAuth2 (recommended for production): CLIENT_ID +
+	//       SERVICE_ACCOUNT_ID + PRIVATE_KEY are all set.  A LineWorksTokenProvider
+	//       is constructed and attached to the sender so tokens are fetched and
+	//       cached automatically at runtime without requiring a restart.
 	lwBotID := os.Getenv("NOTIFICATION_LINE_WORKS_BOT_ID")
 	lwChannelID := os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_ID")
 	if lwBotID != "" && lwChannelID != "" {
-		lwToken := os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN")
-		if lwToken == "" {
-			// Service Account mode: derive a token via OAuth2.
-			lwToken = buildLineWorksOAuth2Token(logger)
+		lwStaticToken := os.Getenv("NOTIFICATION_LINE_WORKS_CHANNEL_TOKEN")
+
+		// Try Service Account OAuth2 mode first when SA credentials are present.
+		tokenProvider := buildLineWorksTokenProvider(logger)
+
+		// We need at least one token source (static or SA provider) to construct
+		// the sender.  Use a placeholder in config when the provider handles tokens.
+		// NewLineWorksSender requires ChannelToken non-empty as a safety check;
+		// supply the static token when available, else a placeholder so the
+		// provider-based flow is used at Send time.
+		effectiveToken := lwStaticToken
+		if effectiveToken == "" && tokenProvider != nil {
+			// SA provider will supply the real token at Send time.
+			// Use a sentinel so NewLineWorksSender construction succeeds.
+			effectiveToken = "provider-managed"
 		}
-		if lwToken != "" {
+
+		if effectiveToken != "" {
 			sender, err := notification.NewLineWorksSender(notification.LineWorksConfig{
 				BotID:        lwBotID,
 				ChannelID:    lwChannelID,
-				ChannelToken: lwToken,
+				ChannelToken: effectiveToken,
 			})
 			if err != nil {
 				logger.Warn("server: LINE WORKS chat sender misconfigured; skipping",
 					"error", err.Error(),
 				)
 			} else {
-				logger.Info("server: chat sender enabled: line_works")
+				// Attach the dynamic token provider when SA credentials were given.
+				// When tokenProvider is non-nil it takes precedence over the static
+				// ChannelToken at Send time (see LineWorksSender.Send).
+				if tokenProvider != nil {
+					sender.TokenProvider = tokenProvider
+					logger.Info("server: chat sender enabled: line_works (SA OAuth2 token provider)")
+				} else {
+					logger.Info("server: chat sender enabled: line_works (static token)")
+				}
 				senders = append(senders, sender)
 			}
 		} else {
@@ -775,23 +827,21 @@ func buildChatSenders(logger *slog.Logger) []notification.ChatSender {
 	return senders
 }
 
-// buildLineWorksOAuth2Token attempts to obtain a LINE WORKS access token via
-// the Service Account JWT Client Credentials flow.  It returns the token string
-// on success, or empty string on failure (after logging the error).
+// buildLineWorksTokenProvider constructs a LineWorksTokenProvider from the
+// Service Account environment variables.  Returns nil when the required env
+// vars are absent (SA mode not configured).
 //
-// This is called once at startup; the returned token is passed to
-// NewLineWorksSender as the initial ChannelToken.  For long-running processes a
-// production deployment should periodically refresh the token (e.g. via a
-// background goroutine or by integrating LineWorksTokenProvider directly into
-// LineWorksSender).
+// When non-nil, the provider is attached to LineWorksSender.TokenProvider so
+// that tokens are fetched and cached dynamically on each Send call — no manual
+// rotation or server restart is needed when the token expires.
 //
 // SECURITY: the private key is read from the env variable and is never logged.
-func buildLineWorksOAuth2Token(logger *slog.Logger) string {
+func buildLineWorksTokenProvider(logger *slog.Logger) *notification.LineWorksTokenProvider {
 	clientID := os.Getenv("NOTIFICATION_LINE_WORKS_CLIENT_ID")
 	saID := os.Getenv("NOTIFICATION_LINE_WORKS_SERVICE_ACCOUNT_ID")
 	privKey := os.Getenv("NOTIFICATION_LINE_WORKS_PRIVATE_KEY")
 	if clientID == "" || saID == "" || privKey == "" {
-		return ""
+		return nil
 	}
 	provider, err := notification.NewLineWorksTokenProvider(notification.LineWorksServiceAccountConfig{
 		ClientID:         clientID,
@@ -799,21 +849,24 @@ func buildLineWorksOAuth2Token(logger *slog.Logger) string {
 		PrivateKeyPEM:    privKey,
 	})
 	if err != nil {
-		logger.Warn("server: LINE WORKS token provider construction failed; skipping",
+		logger.Warn("server: LINE WORKS token provider construction failed; SA mode disabled",
 			"error", err.Error(),
 		)
-		return ""
+		return nil
 	}
-	// Fetch a token synchronously at startup (short timeout to avoid blocking).
-	// context.Background is acceptable here — startup is sequential.
-	token, err := provider.Token(context.Background())
-	if err != nil {
-		logger.Warn("server: LINE WORKS initial token fetch failed; skipping sender",
+	// Probe the token at startup to surface misconfigured credentials early.
+	// Failure is non-fatal: log a Warn and skip the SA provider (fall back to
+	// static token or no sender), mirroring the original buildLineWorksOAuth2Token
+	// behaviour.
+	probeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := provider.Token(probeCtx); err != nil {
+		logger.Warn("server: LINE WORKS SA token fetch at startup failed; skipping sender",
 			"error", err.Error(),
 		)
-		return ""
+		return nil
 	}
-	return token
+	return provider
 }
 
 // buildBounceWebhookConfig reads bounce/complaint webhook configuration from

@@ -307,8 +307,15 @@ type LineWorksConfig struct {
 // Scaffold: only text messages are sent.  Rich content (button templates,
 // image maps) can be added by extending lineWorksMessage.Content.
 type LineWorksSender struct {
-	cfg     LineWorksConfig
-	apiBase string // injectable for testing; defaults to production endpoint
+	cfg           LineWorksConfig
+	apiBase       string                  // injectable for testing; defaults to production endpoint
+	// TokenProvider, when non-nil, fetches a fresh OAuth2 token dynamically via
+	// the Service Account JWT flow (LineWorksTokenProvider).  When nil the sender
+	// falls back to the static cfg.ChannelToken.
+	//
+	// SECURITY: the token returned by TokenProvider is a secret; it is placed
+	// only in the Authorization header and is never logged.
+	TokenProvider *LineWorksTokenProvider
 }
 
 // lineWorksAPIBase is the LINE WORKS Bot API 2.0 base URL.
@@ -338,6 +345,18 @@ type lineWorksContent struct {
 
 // Send implements ChatSender for LINE WORKS.
 func (l *LineWorksSender) Send(ctx context.Context, msg ChatMessage) (string, error) {
+	// Resolve the bearer token: prefer the dynamic TokenProvider when set (OAuth2
+	// SA flow with caching); fall back to the static ChannelToken from config.
+	// SECURITY: the resolved token is a secret — never log it.
+	token := l.cfg.ChannelToken
+	if l.TokenProvider != nil {
+		var err error
+		token, err = l.TokenProvider.Token(ctx)
+		if err != nil {
+			return "", fmt.Errorf("notification: line_works: token fetch: %w", err)
+		}
+	}
+
 	text := msg.Text
 	if msg.DeepLink != "" {
 		text = fmt.Sprintf("%s\n%s", msg.Text, msg.DeepLink)
@@ -360,7 +379,7 @@ func (l *LineWorksSender) Send(ctx context.Context, msg ChatMessage) (string, er
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// SECURITY: Authorization header contains a secret token — never logged.
-	req.Header.Set("Authorization", "Bearer "+l.cfg.ChannelToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
