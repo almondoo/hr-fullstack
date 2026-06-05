@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: ["main", "develop"]
 
+# 最小権限: CI はリポジトリ内容の読み取りのみ必要。
+permissions:
+  contents: read
+
+# 同一ブランチ/PR の進行中ランは新しい push でキャンセルする。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ─────────────────────────────────────────────
   # Backend (Go)
@@ -70,7 +79,10 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          # version is read from packageManager field in frontend/package.json
+          # frontend/package.json に packageManager フィールドが無いため、ここで
+          # pnpm のメジャーを明示する(最新 pnpm 9.x。pnpm-lock.yaml の
+          # lockfileVersion 9.0 と互換)。未指定だと action がバージョンを解決できず失敗する。
+          version: 9
           run_install: false
 
       - name: Set up Node

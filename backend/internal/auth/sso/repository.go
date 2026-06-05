@@ -76,6 +76,7 @@ type oidcConfigJSON struct {
 	Scopes            []string `json:"scopes"`
 	ExpectedAlgorithm string   `json:"expected_algorithm"`
 	AllowedAudiences  []string `json:"allowed_audiences"`
+	ExpectedTenantID  string   `json:"expected_tenant_id"`
 }
 
 type samlConfigJSON struct {
@@ -190,6 +191,7 @@ func dbRowToIdentityProvider(row dbIdentityProvider) (IdentityProvider, error) {
 			Scopes:            cfg.Scopes,
 			ExpectedAlgorithm: cfg.ExpectedAlgorithm,
 			AllowedAudiences:  cfg.AllowedAudiences,
+			ExpectedTenantID:  cfg.ExpectedTenantID,
 		}
 	case ProtocolSAML:
 		var cfg samlConfigJSON
@@ -281,6 +283,38 @@ func (s *StateStore) Consume(ctx context.Context, tenantID uuid.UUID, state stri
 		return tx.Exec(`DELETE FROM sso_state WHERE id = ? AND tenant_id = ?`, row.ID, tenantID).Error
 	})
 	return
+}
+
+// CleanupExpiredStates deletes all sso_state rows whose expires_at is in the past.
+//
+// # BYPASSRLS requirement
+//
+// db MUST be a *gorm.DB opened with the hr_system role (BYPASSRLS), typically
+// via the SYSTEM_DATABASE_URL environment variable.  The sso_state table has
+// ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY.  A connection opened
+// with the hr_app role (NOBYPASSRLS) and no active app.tenant_id session
+// variable will match zero rows — the cleanup becomes a silent no-op and the
+// table grows unboundedly.  Always use a BYPASSRLS connection for this
+// cross-tenant sweep.
+//
+// Design notes:
+//   - This method intentionally bypasses tenantdb.WithinTenant because sso_state
+//     expiry is a system-level sweep that must cover all tenants in one pass,
+//     matching the pattern used by cmd/retention's all-tenants mode.
+//   - The WHERE clause uses a parameterised placeholder for the timestamp —
+//     no string-concatenation SQL injection risk.
+//   - The function is idempotent; running it multiple times is safe.
+//
+// Returns the number of deleted rows and any error.
+func CleanupExpiredStates(ctx context.Context, db *gorm.DB) (int64, error) {
+	result := db.WithContext(ctx).Exec(
+		`DELETE FROM sso_state WHERE expires_at < ?`,
+		time.Now(),
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("sso: CleanupExpiredStates: %w", result.Error)
+	}
+	return result.RowsAffected, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -236,9 +237,20 @@ func (s *Service) SendChat(ctx context.Context, in SendChatInput) (*SendChatResu
 
 	msg := ChatMessage{Text: in.Text, DeepLink: in.DeepLink}
 
+	// chatOutcomes captures per-channel send results so we can persist them
+	// inside the WithinTenant transaction below without holding the connection
+	// open during the HTTP call.
+	type chatOutcome struct {
+		channel       string
+		deliveryToken string
+		status        string
+		lastError     string
+	}
+	outcomes := make([]chatOutcome, 0, len(s.chatSenders))
+
 	for _, sender := range s.chatSenders {
 		name := sender.ChannelName()
-		_, sendErr := sender.Send(ctx, msg)
+		deliveryToken, sendErr := sender.Send(ctx, msg)
 		if sendErr != nil {
 			result.Errors[name] = sendErr
 			slog.Warn("notification: chat send failed",
@@ -246,14 +258,68 @@ func (s *Service) SendChat(ctx context.Context, in SendChatInput) (*SendChatResu
 				"event_type", in.EventType,
 				"error", sendErr.Error(),
 			)
+			outcomes = append(outcomes, chatOutcome{
+				channel:   name,
+				status:    ChatDeliveryStatusFailed,
+				lastError: "send_failed",
+			})
 		} else {
 			result.SentChannels = append(result.SentChannels, name)
+			outcomes = append(outcomes, chatOutcome{
+				channel:       name,
+				deliveryToken: deliveryToken,
+				status:        ChatDeliveryStatusSent,
+			})
 		}
 	}
 
-	// Audit the dispatch attempt (per-tenant RLS).  The audit record carries
-	// only opaque identifiers — no message body, no PII.
-	auditErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+	// SendChat is a no-op when no senders are registered (early return avoids
+	// unnecessary transaction and audit record when nothing was attempted).
+	if len(outcomes) == 0 {
+		return result, nil
+	}
+
+	// Persist chat_deliveries and audit record in a single per-tenant transaction.
+	// SECURITY: message bodies and PII are never written to chat_deliveries.
+	// Only opaque identifiers (channel, event_type, status, delivery_token) are stored.
+	dbErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
+		// A single correlation UUID is shared across channels in this SendChat call
+		// so callers can correlate delivery rows with the triggering event.
+		// chat_deliveries.notification_id is a logical reference (no FK) — see
+		// db/migrations/00037_notification_chat.sql.
+		correlationID := uuid.New()
+
+		for _, o := range outcomes {
+			d := ChatDelivery{
+				ID:             uuid.New(),
+				TenantID:       in.TenantID,
+				NotificationID: correlationID,
+				Channel:        o.channel,
+				EventType:      in.EventType,
+				Status:         o.status,
+				Attempts:       1,
+				MaxAttempts:    3,
+				LastError:      o.lastError,
+				DeliveryToken:  o.deliveryToken,
+			}
+			if o.status == ChatDeliveryStatusSent {
+				now := time.Now()
+				d.SentAt = &now
+			}
+			if err := tx.Exec(
+				`INSERT INTO chat_deliveries
+				   (id, tenant_id, notification_id, channel, event_type,
+				    status, attempts, max_attempts, last_error, delivery_token, sent_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				d.ID, d.TenantID, d.NotificationID, d.Channel, d.EventType,
+				d.Status, d.Attempts, d.MaxAttempts, d.LastError, d.DeliveryToken, d.SentAt,
+			).Error; err != nil {
+				return fmt.Errorf("notification: insert chat_delivery channel=%s: %w", d.Channel, err)
+			}
+		}
+
+		// Audit the dispatch attempt.  The audit record carries only opaque
+		// identifiers — no message body, no PII.
 		return audit.Record(tx, audit.Entry{
 			TenantID:     in.TenantID,
 			UserID:       &in.ActorID,
@@ -263,11 +329,13 @@ func (s *Service) SendChat(ctx context.Context, in SendChatInput) (*SendChatResu
 			IP:           in.IP,
 		})
 	})
-	if auditErr != nil {
-		// Audit failure is non-fatal for the chat dispatch but should be visible.
-		slog.Error("notification: chat audit failed",
+	if dbErr != nil {
+		// DB failure (chat_deliveries insert or audit) is non-fatal for the
+		// caller's perspective — the chat message was already dispatched to the
+		// platform.  Log at Error level so on-call is notified.
+		slog.Error("notification: chat_deliveries persist/audit failed",
 			"event_type", in.EventType,
-			"error", auditErr.Error(),
+			"error", dbErr.Error(),
 		)
 	}
 

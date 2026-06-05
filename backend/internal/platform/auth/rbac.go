@@ -14,6 +14,36 @@ import (
 	"github.com/your-org/hr-saas/internal/platform/tenantdb"
 )
 
+// ---------------------------------------------------------------------------
+// System role definitions — used when seeding/provisioning system roles.
+// ---------------------------------------------------------------------------
+
+// RoleSystemRetention is the name of the dedicated service-account role for
+// the data-retention and disposal cron job (cmd/retention).
+//
+// This role name is stored in the roles.name column (per-tenant).
+// Provision instructions: docs/ops/retention-service-account.md
+const RoleSystemRetention = "system_retention"
+
+// SystemRetentionPerms is the minimum permission set for RoleSystemRetention.
+// Only the permissions strictly required by the retention job are included:
+//   - "mynumber:reveal" — required by mynumber.Service.Dispose RBAC check
+//   - "ledger:write"    — required to set retention_expired on ledger rows
+//
+// audit_logs INSERT and retention_job_runs INSERT/UPDATE are granted at the
+// DB level (to hr_app); no additional RBAC permission is needed for those.
+//
+// DO NOT extend this set without 社労士/弁護士 review and explicit approval.
+var SystemRetentionPerms = []string{
+	"mynumber:reveal",
+	"ledger:write",
+}
+
+// SystemRetentionPermsJSON is the pre-serialised permissions jsonb value
+// for inserting/seeding the system_retention role row.
+// Format must match the permissionsJSON shape: {"perms":[...]}.
+const SystemRetentionPermsJSON = `{"perms":["mynumber:reveal","ledger:write"]}`
+
 // LoadUserPermissions fetches the permission slice for userID within the
 // already-open tenant transaction tx.  Callers that need to perform an
 // in-service RBAC check (e.g. approval engine checking approval:admin) should

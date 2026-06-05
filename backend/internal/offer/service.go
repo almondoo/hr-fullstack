@@ -235,7 +235,7 @@ func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInp
 		return tx.Raw(
 			`SELECT id, tenant_id, offer_id, file_ref, version, esign_provider,
 			        esign_envelope_id, content_hash, signer_ref, signed_at,
-			        created_at, updated_at
+			        retention_expires_on, created_at, updated_at
 			 FROM offer_letters
 			 WHERE id = ? AND tenant_id = ? LIMIT 1`,
 			in.LetterID, in.TenantID,
@@ -256,15 +256,39 @@ func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInp
 		return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status adapter: %w", adapterErr)
 	}
 
-	// When completed, persist signed_at and record an audit entry.
+	// When completed, persist signed_at (and backfill retention_expires_on)
+	// and record an audit entry.
 	if status.Status == econtract.SignStatusCompleted && letter.SignedAt == nil && status.SignedAt != nil {
+		// Compute retention expiry using the same logic as IssueLetter:
+		// fetch offer_settings.retention_years outside the transaction (read-only,
+		// no DB write) and derive the expiry via CalcRetentionExpiry.
+		//
+		// Error handling (fail-closed):
+		//   - ErrSettingNotFound → settings not yet configured; leave
+		//     retention_expires_on NULL intentionally (job skips unconfigured rows).
+		//   - any other error (DB failure, etc.) → return error so the UPDATE is
+		//     not executed; the caller can retry and recover (avoids the
+		//     irrecoverable NULL-fixation that would occur if we silently skipped
+		//     and the signed_at guard prevented future re-polling).
+		var retentionExpiresOn *time.Time
+		if pollSettings, settingsErr := s.GetSettings(ctx, in.TenantID); settingsErr == nil {
+			if pollSettings.RetentionYears > 0 {
+				expiry := econtract.CalcRetentionExpiry(*status.SignedAt, pollSettings.RetentionYears)
+				retentionExpiresOn = &expiry
+			}
+			// RetentionYears == 0: settings exist but not configured → nil (intentional).
+		} else if !errors.Is(settingsErr, ErrSettingNotFound) {
+			return nil, econtract.SignStatus{}, fmt.Errorf("offer: poll signing status fetch settings: %w", settingsErr)
+		}
+
 		writeErr := s.tdb.WithinTenant(ctx, in.TenantID, func(tx *gorm.DB) error {
 			res := tx.Exec(
 				`UPDATE offer_letters
-				 SET    signed_at  = ?,
-				        updated_at = now()
+				 SET    signed_at           = ?,
+				        retention_expires_on = ?,
+				        updated_at          = now()
 				 WHERE  id = ? AND tenant_id = ? AND signed_at IS NULL`,
-				status.SignedAt, in.LetterID, in.TenantID,
+				status.SignedAt, retentionExpiresOn, in.LetterID, in.TenantID,
 			)
 			if res.Error != nil {
 				return fmt.Errorf("offer: poll signing status update: %w", res.Error)
@@ -284,6 +308,7 @@ func (s *Service) PollSigningStatus(ctx context.Context, in PollSigningStatusInp
 			return nil, econtract.SignStatus{}, writeErr
 		}
 		letter.SignedAt = status.SignedAt
+		letter.RetentionExpiresOn = retentionExpiresOn
 	}
 
 	return &letter, status, nil

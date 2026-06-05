@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"gorm.io/gorm"
+
 	platformauth "github.com/your-org/hr-saas/internal/platform/auth"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/crypto"
@@ -122,6 +124,43 @@ func main() {
 	}
 	defer sqlDB.Close()
 
+	// --- 4b. System DB (hr_system role, BYPASSRLS) — optional ---
+	// Used exclusively for cross-tenant bounce-webhook delivery lookups where no
+	// tenant context is available (notification.findDeliveriesByProviderAndHash).
+	//
+	// Source from: SYSTEM_DATABASE_URL environment variable.
+	// When unset the server starts normally; bounce lookups degrade gracefully
+	// (log warning, return empty results) — no traffic is blocked.
+	//
+	// SECURITY: this connection MUST use the hr_system role (BYPASSRLS).  It
+	// MUST NOT be used for tenant-scoped writes or any purpose beyond the narrow
+	// bounce lookup.  See docs/04_tech_stack.md §6 for the role model.
+	//
+	// Operational prerequisite: the hr_system PostgreSQL role must already exist:
+	//   CREATE ROLE hr_system WITH LOGIN BYPASSRLS PASSWORD '...';
+	//   GRANT SELECT ON email_deliveries TO hr_system;
+	// (Check db/migrations/ for role creation SQL; provision manually if absent.)
+	var systemDatabase *gorm.DB
+	if systemDSN := os.Getenv("SYSTEM_DATABASE_URL"); systemDSN != "" {
+		sysCtx, sysCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer sysCancel()
+		sysDB, sysErr := db.Open(sysCtx, systemDSN, logger)
+		if sysErr != nil {
+			// Non-fatal: log and continue without systemDB.
+			logger.Warn("system DB (BYPASSRLS) connection failed; bounce webhook cross-tenant lookup disabled",
+				"error", sysErr.Error(),
+			)
+		} else {
+			systemDatabase = sysDB
+			if sysSQLDB, e := sysDB.DB(); e == nil {
+				defer sysSQLDB.Close()
+			}
+			logger.Info("system DB (BYPASSRLS) connected")
+		}
+	} else {
+		logger.Info("SYSTEM_DATABASE_URL not set; bounce webhook cross-tenant lookup disabled (safe degrade)")
+	}
+
 	// --- 5. Router ---
 	tdb := tenantdb.New(database)
 	sessionStore := platformauth.NewSessionStore()
@@ -161,6 +200,7 @@ func main() {
 		SessionStore:   sessionStore,
 		FieldCipher:    fieldCipher,
 		MetricsHandler: metricsHandler,
+		SystemDB:       systemDatabase,
 	}
 	router := server.New(cfg, deps, logger)
 

@@ -77,6 +77,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/your-org/hr-saas/internal/mynumber"
+	"github.com/your-org/hr-saas/internal/offer/econtract"
 	"github.com/your-org/hr-saas/internal/platform/config"
 	"github.com/your-org/hr-saas/internal/platform/db"
 	"github.com/your-org/hr-saas/internal/platform/logging"
@@ -93,7 +94,7 @@ func main() {
 	graceDays := flag.Int("employee-grace-days", 0,
 		"employee data grace period in days after contract end (0 = disabled)")
 	job := flag.String("job", "all",
-		"which job to run: all | mynumber_disposal | ledger_retention | employee_data_policy | document_expiry")
+		"which job to run: all | mynumber_disposal | ledger_retention | employee_data_policy | document_expiry | econtract_retention")
 	flag.Parse()
 
 	logger := logging.New("production")
@@ -164,8 +165,12 @@ func main() {
 
 	runner := retention.NewRunner(tdb, mynumberSvc, retentionCfg, logger, actorID)
 
+	// econtract retention runner — uses the same tdb / actorID as the main runner.
+	// BatchLimit defaults to 500; override via ECONTRACT_RETENTION_BATCH_LIMIT if needed.
+	econtractRunner := econtract.NewRetentionRunner(tdb, econtract.DefaultRetentionConfig(), logger, actorID)
+
 	if *allTenants {
-		runAllTenants(ctx, database, runner, logger, *job)
+		runAllTenants(ctx, database, runner, econtractRunner, logger, *job)
 		return
 	}
 
@@ -182,7 +187,7 @@ func main() {
 		"job", *job,
 	)
 
-	runErr := runJobForTenant(ctx, runner, tenantID, *job, logger)
+	runErr := runJobForTenant(ctx, runner, econtractRunner, tenantID, *job, logger)
 	if runErr != nil {
 		logger.Error("retention job finished with error", "error", runErr)
 		os.Exit(1)
@@ -210,6 +215,7 @@ func runAllTenants(
 	ctx context.Context,
 	database *gorm.DB,
 	runner *retention.Runner,
+	econtractRunner *econtract.RetentionRunner,
 	logger *slog.Logger,
 	job string,
 ) {
@@ -239,7 +245,7 @@ func runAllTenants(
 
 	for _, t := range tenants {
 		logger.Info("retention: processing tenant", "tenant_id", t.ID)
-		if err := runJobForTenant(ctx, runner, t.ID, job, logger); err != nil {
+		if err := runJobForTenant(ctx, runner, econtractRunner, t.ID, job, logger); err != nil {
 			logger.Error("retention: tenant failed",
 				"tenant_id", t.ID, "error", err)
 			errCount++
@@ -268,13 +274,22 @@ func runAllTenants(
 func runJobForTenant(
 	ctx context.Context,
 	runner *retention.Runner,
+	econtractRunner *econtract.RetentionRunner,
 	tenantID uuid.UUID,
 	job string,
 	logger *slog.Logger,
 ) error {
 	switch job {
 	case "all":
-		return runner.Run(ctx, tenantID)
+		var firstErr error
+		record := func(err error) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		record(runner.Run(ctx, tenantID))
+		record(econtractRunner.Run(ctx, tenantID))
+		return firstErr
 	case retention.JobMyNumberDisposal:
 		return runner.RunMyNumberDisposal(ctx, tenantID)
 	case retention.JobLedgerRetention:
@@ -283,8 +298,10 @@ func runJobForTenant(
 		return runner.RunEmployeeDataPolicy(ctx, tenantID)
 	case retention.JobDocumentExpiry:
 		return runner.RunDocumentExpiry(ctx, tenantID)
+	case econtract.JobEContractRetention:
+		return econtractRunner.Run(ctx, tenantID)
 	default:
-		logger.Error("unknown -job value; valid: all | mynumber_disposal | ledger_retention | employee_data_policy | document_expiry")
+		logger.Error("unknown -job value; valid: all | mynumber_disposal | ledger_retention | employee_data_policy | document_expiry | econtract_retention")
 		os.Exit(1)
 		return nil // unreachable
 	}

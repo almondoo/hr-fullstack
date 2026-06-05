@@ -73,8 +73,8 @@ spec:
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
+            runAsUser: 65532   # distroless nonroot uid (matches Dockerfile.retention USER nonroot)
+            runAsGroup: 65532  # distroless nonroot gid
 
           containers:
             - name: retention

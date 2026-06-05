@@ -1,0 +1,107 @@
+# ===========================================================================
+# Kubernetes CronJob — hr-saas sso-cleanup job
+# ===========================================================================
+# PURPOSE:
+#   Runs cmd/sso-cleanup hourly to purge expired sso_state rows across all
+#   tenants. SSO flow states have a 10-minute TTL and are orphaned whenever
+#   a user abandons the login flow without completing the callback.
+#
+# STATUS:
+#   EXAMPLE ONLY — real deployment wiring depends on deploy-target decision.
+#   Cluster name, namespace, image registry, secret names, resource limits
+#   must be adapted for the target environment.
+#
+# PREREQUISITES (operator checklist before applying):
+#   1. Build and push the sso-cleanup binary image:
+#        docker build -f backend/Dockerfile.sso-cleanup \
+#            -t <REGISTRY>/hr-sso-cleanup:<TAG> backend/
+#        docker push <REGISTRY>/hr-sso-cleanup:<TAG>
+#   2. Create the Kubernetes Secret with the hr_system (BYPASSRLS) DSN.
+#      The binary MUST connect as hr_system, NOT hr_app — sso_state has
+#      FORCE RLS and a NOBYPASSRLS connection yields 0 deleted rows:
+#        kubectl create secret generic hr-sso-cleanup-secrets \
+#          --from-literal=SYSTEM_DATABASE_URL='postgres://hr_system:<pw>@<host>:5432/<db>?sslmode=require'
+#   3. Substitute <REGISTRY>, <TAG>, <NAMESPACE>, <DB_HOST>, <DB_NAME> below.
+#   4. Review the schedule — hourly is appropriate for most deployments.
+#
+# SECURITY:
+#   - The Pod runs as a non-root user (runAsNonRoot: true).
+#   - Secrets are injected via env vars from a Secret ref (never hardcoded).
+#   - The binary connects as hr_system (BYPASSRLS); required for cross-tenant
+#     DELETE on sso_state (FORCE RLS).  hr_app would silently delete 0 rows.
+#   - Only expired rows (expires_at < now()) are deleted; no tenant data risk.
+#   - hr_system's DML privileges MUST be restricted to sso_state DELETE only
+#     (least privilege). Provision via migration with GRANT DELETE ON sso_state.
+#   - See SECURITY.md §4 for the full security checklist.
+# ===========================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hr-sso-cleanup
+  namespace: <NAMESPACE>          # TODO: substitute real namespace
+  labels:
+    app: hr-sso-cleanup
+    component: batch
+spec:
+  # Run hourly. SSO state TTL is 10 minutes, so hourly is more than sufficient.
+  schedule: "0 * * * *"
+
+  # Do not allow concurrent runs.
+  concurrencyPolicy: Forbid
+
+  # Retain the last 3 successful and 1 failed job for log inspection.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      # No retry — the job is idempotent and the next hourly run will catch any
+      # rows that were not deleted due to a transient failure.
+      backoffLimit: 0
+
+      # Time-limit: 5 minutes matches the in-process timeout in main.go.
+      activeDeadlineSeconds: 300
+
+      template:
+        metadata:
+          labels:
+            app: hr-sso-cleanup
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+
+          containers:
+            - name: sso-cleanup
+              image: <REGISTRY>/hr-sso-cleanup:<TAG>    # TODO: substitute
+
+              env:
+                # SYSTEM_DATABASE_URL: hr_system role (BYPASSRLS) DSN.
+                # MUST use hr_system, not hr_app — sso_state FORCE RLS causes
+                # a NOBYPASSRLS connection to delete 0 rows (silent no-op).
+                # See .env.example for DSN format and provisioning guidance.
+                - name: SYSTEM_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: hr-sso-cleanup-secrets
+                      key: SYSTEM_DATABASE_URL
+
+                # Application environment tag (used by logging.New).
+                - name: APP_ENV
+                  value: "production"
+
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
